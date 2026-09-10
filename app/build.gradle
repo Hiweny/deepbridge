@@ -1,0 +1,64 @@
+plugins {
+    id 'com.android.application'
+}
+
+// 可选的发布签名配置：在工程根目录放置 keystore.properties：
+//   storeFile=../release.jks
+//   storePassword=xxxx
+//   keyAlias=deepbridge
+//   keyPassword=xxxx
+// CI 通过 GitHub Secrets 注入；本地缺失时自动回退到 debug 签名，保证 assembleRelease 永远可出包。
+def keystorePropsFile = rootProject.file("keystore.properties")
+def hasReleaseKeystore = keystorePropsFile.exists()
+Properties keystoreProps = new Properties()
+if (hasReleaseKeystore) {
+    keystoreProps.load(new FileInputStream(keystorePropsFile))
+}
+
+android {
+    namespace 'com.hiweny.deepbridge'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.hiweny.deepbridge"
+        minSdk 24
+        targetSdk 34
+        versionCode 4
+        versionName "1.4.0"
+        vectorDrawables.useSupportLibrary = false
+    }
+
+    signingConfigs {
+        release {
+            if (hasReleaseKeystore) {
+                storeFile file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // 有正式密钥用正式签名，否则回退 debug 签名（仍可安装）
+            signingConfig hasReleaseKeystore ? signingConfigs.release : signingConfigs.debug
+        }
+        debug {
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    // 二维码生成（原 APK 内打包了 zxing 源码，这里改用等价的官方 maven 构件，编码结果一致）
+    implementation 'com.google.zxing:core:3.5.3'
+}

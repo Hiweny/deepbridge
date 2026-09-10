@@ -1,61 +1,108 @@
-# DeepBridge · 微信桥接
+# DeepBridge · DeepSeek 微信桥
 
-> 当当当当！让 DeepSeek「住进」你的微信——不用来回切 App，直接在微信聊天框里和 DeepSeek 对话。
+把 **微信 ClawBot（iLink）** 和 **DeepSeek 网页版** 桥接起来：在微信里直接和 DeepSeek 聊天，支持**长期记忆、多条消息、图片/文件转发、后台常驻**。App 本身不直接调用 DeepSeek 私有 API，而是在本地 WebView 中以「纯网页层」方式驱动 `chat.deepseek.com`（自动填字、点发送、截取流式回复），因此**登录态、模式选择、DeepThink/联网开关、人机校验全部沿用官网**，稳定且不碰账号密码。
 
-DeepBridge 是一个极轻量的 Android 桥接应用（安装包只有几百 KB）。它借助微信里的 **ClawBot**，配合一段注入脚本，把微信和 **DeepSeek 官网**搭上线：你在微信发消息，它替你送进 DeepSeek 官网的输入框并自动发送，再把生成好的回复原样搬回微信。
+> 安装包请到 [Releases](../../releases) 下载；本仓库从 v1.4.0 起开放完整源码，并用 GitHub Actions 自动构建 APK。
 
-## ✨ 特性
+## 功能特性
 
-- 💬 **微信即对话框**：不用打开 DeepSeek 网页或 App，在微信里就能直接聊。
-- 🧠 **本地人格提示词工程**：可自定义一份人格提示词（system prompt），应用会自动做上下文总结，让这份人格跨越不同对话一直「在线」，不会聊着聊着就丢了人设。
-- ➗ **多条消息分段发送**：用 `\` 把一次回复切成多条消息逐条发出，模拟真人连续发消息的节奏，「活人感」拉满（最多 10 条）。
-- 🛡️ **防撤回**：能截获 DeepSeek 侧被撤回的消息并转发到微信，撤回也照样看得见。
-- 🪶 **体积极小**：整个 APK 只有几百 KB，装上试试几乎没有成本。
+- **微信即对话**：扫码连接 ClawBot 后，在微信里发消息即可与 DeepSeek 对话；令牌本地持久化，免重复扫码。
+- **图片 / 文件传输（v1.4 新增）**：在微信直接发送图片或文件（PDF / Word / Excel / PPT / TXT / Markdown / 代码 / 图片等），App 自动从微信 CDN 下载并 AES 解密，把文件注入 DeepSeek 官网输入区（由官网完成上传、解析与 PoW 校验），再连同你的文字一起发送。可配一句问题，如「总结一下这个文件」。`/文件开|关` 控制总开关。
+- **长期记忆**：人设 + 当前时间 + 记忆摘要 + 近期上下文窗口 + 多条消息规则，本地组装 Prompt；超过阈值自动把更早的对话压缩成摘要，达到轮数阈值自动 New chat 轮换并保留摘要。
+- **摘要篇幅自适应（v1.4 调整）**：记忆压缩不再写死 300 字，按「既有摘要 + 待压缩对话」体量自适应估算，**下限 300、上限可配（默认最多 3000 字）**，信息少从简、信息多可展开。
+- **多条消息**：AI 用单个反斜杠 `\` 分隔多条回复，App 按真人节奏依次发送；`\` 后接小写字母（如 LaTeX `\frac`）不会误拆。
+- **思考过滤 + 撤回拦截**：只取 `RESPONSE` 片段（自动过滤思考过程）；当回复被官方撤回 / 内容过滤时，用本地缓存的真实内容兜底。
+- **后台保活**：前台服务 + WakeLock + 电池白名单引导 + 屏幕常亮；返回键退到后台不中断桥接。
+- **可观测**：控制台实时状态、自检诊断、每个用户的记忆管理（压缩 / 查看摘要 / 清空）、运行日志，微信内 `/状态 /帮助` 等指令。
 
-## ⚙️ 工作原理
+## 工作原理
 
-整套流程就是一条「消息往返」的桥：
-
-1. 你在微信里给 ClawBot 发送消息；
-2. 桥接应用通过 **iLink 协议**拿到这条消息，由注入脚本把它填进 DeepSeek 官网的对话框并自动发送；
-3. 监听 DeepSeek 官网的回复区域，截取生成完成的回答；
-4. 按 `\` 分段后，沿同一条链路回传到你的微信。
-
-防撤回复用的是同一套监听：当 DeepSeek 侧出现「消息被撤回」的变化时，桥接层会在内容消失前把它截下来推送到微信。
-
-```text
-微信  ⇄  ClawBot  ⇄ (iLink 协议) ⇄  DeepBridge 注入脚本  ⇄  DeepSeek 官网对话框
+```
+微信消息（文本/语音/图片/文件）
+   │  iLink 长轮询 getupdates；图片/文件走 CDN 下载 + AES-128-ECB 解密
+   ▼
+本地构造 Prompt（人设 + 时间 + 长期记忆摘要 + 上下文窗口 + 当前消息/附件说明）
+   │  附件：base64 → File → 注入官网 <input type=file>，等待官网 upload_file/fetch_files 完成
+   │  文本：原生 setter 填入输入框 → 等待发送按钮可用 → 点击发送
+   ▼
+WebView 内 hook XHR/fetch，解析 /api/v0/chat/completion 的 SSE 流
+   │  只取 RESPONSE、过滤 THINKING、拦截撤回
+   ▼
+Markdown 清洗为微信友好纯文本 → 按 \ 拆多条 / 按长度切块 → sendmessage 发回微信
 ```
 
-## 🚀 快速开始
+DeepSeek 侧的所有动作都发生在你自己登录的网页里：不内置 API Key、不绕过登录、不伪造会话。
 
-1. 到 [Releases](../../releases) 下载最新的 `deepbridge.apk`（仅几百 KB）并安装；
-2. 在应用内用**微信扫码**绑定 ClawBot；
-3. 登录你的 **DeepSeek 官网账号**；
-4. 让应用保持**后台运行**（建议关闭对它的电池优化、允许后台活动 / 自启动）；
-5. 回到微信，直接给 ClawBot 发消息，就能收到 DeepSeek 的回复。
+## 微信指令
 
-> 💡 小提示：如果短时间内频繁扫码绑定，微信端可能会暂时收不到消息，静置一段时间后会自动恢复——这并不是桥接开发失败。
+| 指令 | 作用 |
+| --- | --- |
+| `/帮助` `/help` | 使用帮助 |
+| `/状态` `/status` | 桥接与记忆状态 |
+| `/压缩` `/compress` | 立即压缩本用户记忆 |
+| `/重置` `/reset` | 清空本用户对话与记忆 |
+| `/人设 描述` | 查看 / 修改角色人设 |
+| `/多条开|关` | 多条消息模式开关 |
+| `/文件开|关` | 图片/文件转发 DeepSeek 开关（v1.4） |
 
-## 🧩 人格提示词与多消息
+## 技术栈与目录结构
 
-在应用里填入你自己的人格提示词即可。想让「多条回复」的效果更明显，可以在人格提示词里显式要求它用 `\` 分段。下面是一段可直接使用、也可二次修改的模板：
+- 原生 Android（Java 8），`minSdk 24 / targetSdk 34`，无 AndroidX/AppCompat 依赖，UI 纯代码构建。
+- 二维码：[ZXing core](https://github.com/zxing/zxing)。
+- 网络：`HttpURLConnection`；加解密：`javax.crypto`（AES/ECB/PKCS7）；持久化：`org.json` + 内部存储。
 
-```text
-强制必须使用"\"来分割你的消息，而不是用双换行，并确保你的消息中至少包含一个"\"。你最多只能把一条回复分割成十条消息，系统会按"\"切分后逐条发送。请充分利用这一能力，根据不同情景和语境选择发送长消息还是简短消息，让自己的行为与语气更像一个真人：日常对话时每句尽量简短、不使用标点，自然随意，就像我们真的在微信里聊天一样流畅。
+```
+app/src/main/
+├─ assets/bridge.js            # 注入 DeepSeek 页面的桥接脚本（SSE 解析/防撤回/DOM 发送/附件注入）
+└─ java/com/hiweny/deepbridge/
+   ├─ MainActivity.java        # 双 Tab UI、扫码登录、WebView、设置/诊断/记忆管理
+   ├─ BotService.java          # 前台服务：长轮询、指令、调度、带附件发送与回发
+   ├─ ConversationEngine.java  # 人设/上下文窗口/自适应摘要压缩/会话轮换/持久化
+   ├─ DeepSeekController.java  # 原生 ↔ bridge.js 同步通道（reqId/latch），sendWithFiles
+   ├─ ILinkClient.java         # 微信 iLink HTTP 协议
+   ├─ WeChatMedia.java         # 微信 CDN 媒体下载 + AES 解密 + MIME 推断（v1.4）
+   ├─ MediaPrepare.java        # 图片尺寸/体积治理，文档原样透传（v1.4）
+   ├─ MediaFile.java           # 附件模型（v1.4）
+   ├─ Util.java / Theme.java   # 工具与配色
+.github/workflows/build.yml    # 打 tag 自动构建签名 APK 并发布 Release
 ```
 
-## 📦 下载
+## 自行构建
 
-- 最新版本：[v1.0.0](../../releases/tag/v1.0.0)
-- APK 直链：<https://github.com/Hiweny/deepbridge/releases/download/v1.0.0/deepbridge.apk>
+### 方式一：GitHub Actions（推荐）
 
-## ⚠️ 说明与免责
+推送 `v*` 标签即自动构建并创建 Release：
 
-- 本项目仅用于个人学习与技术研究，请遵守 DeepSeek 与微信的相关使用条款；
-- 账号安全与使用风险由使用者自行承担；
-- 当前以 Release 形式分发安装包，暂不开放源码。
+1. 仓库 Settings → Secrets and variables → Actions 添加：
+   - `ANDROID_KEYSTORE_BASE64`：`base64 -w0 release.jks`
+   - `KEYSTORE_PASSWORD`、`KEY_ALIAS`、`KEY_PASSWORD`
+2. `git tag v1.x.x && git push origin v1.x.x`，工作流产出已签名 APK 并挂到 Release。
+3. 未配置密钥时会自动回退 debug 签名（仍可安装，仅不能跨签名覆盖升级）。
 
----
+### 方式二：Android Studio / 命令行
 
-Made by [Hiweny](https://hiweny.github.io/Hiweny-s-web/)
+```bash
+# JDK 17 + Android SDK 34
+echo "sdk.dir=/path/to/Android/Sdk" > local.properties
+./gradlew :app:assembleRelease
+# 产物：app/build/outputs/apk/release/app-release.apk
+```
+
+需要正式签名时，在工程根目录放 `keystore.properties`：
+
+```properties
+storeFile=release.jks
+storePassword=***
+keyAlias=deepbridge
+keyPassword=***
+```
+
+## 隐私与安全说明
+
+- DeepSeek 登录态只存在于本机 WebView/Cookie；微信令牌、会话与记忆只保存在 App 内部存储，不上传任何第三方服务器。
+- 图片/文件仅在「微信 CDN → 本机 → DeepSeek 官网」之间流转。
+- 请遵守 DeepSeek 与微信的使用条款，本项目仅供学习与个人效率使用，不对账号风控负责。
+
+## 许可证
+
+[MIT](LICENSE)
