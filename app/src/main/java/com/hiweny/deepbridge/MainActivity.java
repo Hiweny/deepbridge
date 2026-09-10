@@ -59,10 +59,12 @@ public class MainActivity extends Activity {
     private static final String DS_URL = "https://chat.deepseek.com/";
     private static final int TAB_CONTROL = 0;
     private static final int TAB_WEB = 1;
-    private static final String APP_VERSION = "v1.4";
+    private static final String APP_VERSION = "v1.5";
 
     private View controlPanel;
     private View webPanel;
+    private ScrollView controlScroll;
+    private LinearLayout rootView, bottomNav;
     private LinearLayout navIconBoxControl, navIconBoxWeb;
     private TextView navIconControl, navIconWeb, navLabelControl, navLabelWeb;
     private Theme theme;
@@ -105,6 +107,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         theme = Theme.of(this);
+        enableEdgeToEdge();
         buildUi();
         loadBridgeJs();
         setupWebView();
@@ -121,6 +124,42 @@ public class MainActivity extends Activity {
         }
         refreshStats();
         handler.postDelayed(statsTask, 3000L);
+    }
+
+    /** 全屏沉浸：内容延伸到状态栏与系统导航栏下方（像浏览器全屏）。 */
+    private void enableEdgeToEdge() {
+        android.view.Window w = getWindow();
+        View decor = w.getDecorView();
+        decor.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        w.setStatusBarColor(android.graphics.Color.TRANSPARENT);
+        w.setNavigationBarColor(android.graphics.Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= 28) w.setNavigationBarDividerColor(android.graphics.Color.TRANSPARENT);
+        applyBarIconAppearance();
+    }
+
+    /** 浅色主题用深色状态栏/导航图标，深色主题用浅色图标。 */
+    private void applyBarIconAppearance() {
+        View decor = getWindow().getDecorView();
+        int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+        if (!theme.dark) {
+            flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            if (Build.VERSION.SDK_INT >= 26) flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        }
+        decor.setSystemUiVisibility(flags);
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        boolean nowDark = (newConfig.uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        if (nowDark != theme.dark) {
+            recreate(); // 深浅色切换：重建以整套换肤
+        }
     }
 
     private void setWechatStateMain(String s) {
@@ -199,19 +238,38 @@ public class MainActivity extends Activity {
     }
 
     private void buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(theme.bg());
+        rootView = new LinearLayout(this);
+        rootView.setOrientation(LinearLayout.VERTICAL);
+        rootView.setBackgroundColor(theme.bg());
         FrameLayout container = new FrameLayout(this);
         controlPanel = buildControlPanel();
         container.addView(controlPanel, new FrameLayout.LayoutParams(-1, -1));
         webPanel = buildWebPanel();
         webPanel.setVisibility(View.GONE);
         container.addView(webPanel, new FrameLayout.LayoutParams(-1, -1));
-        root.addView(container, new LinearLayout.LayoutParams(-1, 0, 1f));
-        root.addView(buildBottomNav(), new LinearLayout.LayoutParams(-1, -2));
-        setContentView(root);
+        rootView.addView(container, new LinearLayout.LayoutParams(-1, 0, 1f));
+        rootView.addView(buildBottomNav(), new LinearLayout.LayoutParams(-1, -2));
+        setContentView(rootView);
+        applyWindowInsets();
         updateNavStyle();
+    }
+
+    /** 让控制台内容避开状态栏/摄像头，底部标签栏避开系统手势条；WebView 保持全屏铺满。 */
+    private void applyWindowInsets() {
+        if (rootView == null) return;
+        rootView.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top = insets.getSystemWindowInsetTop();
+            int bottom = insets.getSystemWindowInsetBottom();
+            if (controlScroll != null) {
+                controlScroll.setPadding(dp(14), top + dp(12), dp(14), dp(12));
+                controlScroll.setClipToPadding(false);
+            }
+            if (bottomNav != null) {
+                bottomNav.setPadding(0, 0, 0, bottom);
+            }
+            return insets;
+        });
+        rootView.requestApplyInsets();
     }
 
     private View buildWebPanel() {
@@ -222,15 +280,16 @@ public class MainActivity extends Activity {
     }
 
     private View buildBottomNav() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(theme.headerBg());
+        bottomNav = new LinearLayout(this);
+        bottomNav.setOrientation(LinearLayout.VERTICAL);
+        bottomNav.setBackgroundColor(theme.headerBg());
+        bottomNav.setElevation(dp(10));
         View divider = new View(this);
         divider.setBackgroundColor(theme.divider());
-        root.addView(divider, new LinearLayout.LayoutParams(-1, Math.max(1, dp(1))));
+        bottomNav.addView(divider, new LinearLayout.LayoutParams(-1, Math.max(1, dp(1))));
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setPadding(dp(24), dp(7), dp(24), dp(9));
+        row.setPadding(dp(24), dp(8), dp(24), dp(10));
         LinearLayout.LayoutParams itemLp = new LinearLayout.LayoutParams(0, -2, 1f);
         LinearLayout itemC = buildNavItem("🎛", "控制台", v -> switchTab(TAB_CONTROL));
         LinearLayout itemW = buildNavItem("💬", "对话页", v -> switchTab(TAB_WEB));
@@ -238,8 +297,8 @@ public class MainActivity extends Activity {
         itemW.setTag("w");
         row.addView(itemC, itemLp);
         row.addView(itemW, itemLp);
-        root.addView(row, new LinearLayout.LayoutParams(-1, -2));
-        return root;
+        bottomNav.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        return bottomNav;
     }
 
     private LinearLayout buildNavItem(String icon, String label, final View.OnClickListener onClick) {
@@ -321,10 +380,11 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
         scroll.setFillViewport(true);
+        scroll.setClipToPadding(false);
+        controlScroll = scroll;
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(14);
-        box.setPadding(pad, dp(14), pad, dp(16));
+        box.setPadding(0, 0, 0, dp(16)); // 横向与顶部留白由 ScrollView 的 insets padding 统一负责
         scroll.addView(box);
 
         LinearLayout header = new LinearLayout(this);
@@ -349,7 +409,7 @@ public class MainActivity extends Activity {
         box.addView(header);
 
         TextView sub = new TextView(this);
-        sub.setText("微信 ClawBot × DeepSeek · 长期记忆 + 图片/文件桥接");
+        sub.setText("微信 ClawBot × DeepSeek 娘 · 长期记忆 · 图片/文件 · 深色沉浸");
         sub.setTextSize(12f);
         sub.setTextColor(theme.textSub());
         sub.setPadding(0, dp(2), 0, 0);
@@ -414,24 +474,18 @@ public class MainActivity extends Activity {
         box.addView(cardTitle("操作"));
         String[][] actions = {
                 {"🔗", "连接微信"}, {"⛔", "断开微信"},
-                {"🗜", "手动压缩"}, {"🧠", "记忆管理"},
-                {"🩺", "自检诊断"}, {"✨", "新建对话"},
-                {"⚙", "更多设置"}, {"📜", "运行日志"}};
+                {"📝", "Prompt工程"}, {"🧠", "记忆管理"},
+                {"🗜", "手动压缩"}, {"🩺", "自检诊断"},
+                {"✨", "新建对话"}, {"⚙", "更多设置"},
+                {"📜", "运行日志"}, {"❓", "使用帮助"}};
         View.OnClickListener[] listeners = {
                 v -> showQrDialog(), v -> disconnectWechat(),
-                v -> manualCompress(), v -> showMemoryManager(),
-                v -> runDiagnostics(), v -> newChatFromUi(),
-                v -> showSettings(), v -> showLog()};
+                v -> showPromptStudio(), v -> showMemoryManager(),
+                v -> manualCompress(), v -> runDiagnostics(),
+                v -> newChatFromUi(), v -> showSettings(),
+                v -> showLog(), v -> showHelp()};
         box.addView(buildActionGrid(actions, listeners));
         box.addView(spacer(dp(4)));
-
-        TextView helpEntry = new TextView(this);
-        helpEntry.setText("❓ 使用帮助");
-        helpEntry.setTextSize(13f);
-        helpEntry.setTextColor(theme.accent());
-        helpEntry.setPadding(dp(4), dp(10), dp(4), dp(6));
-        helpEntry.setOnClickListener(v -> showHelp());
-        box.addView(helpEntry);
 
         TextView tip = new TextView(this);
         tip.setText("提示：首次使用请到「对话页」登录 DeepSeek 并手动选择模式与开关；\n微信可直接发图片/文件；收到消息但没回复时，看「运行状态」或「自检诊断」定位问题");
@@ -607,6 +661,7 @@ public class MainActivity extends Activity {
         s.setUseWideViewPort(true);
         s.setTextZoom(100);
         s.setUserAgentString(DESKTOP_UA);
+        applyWebDark(s);
         CookieManager.getInstance().setAcceptCookie(true);
         if (Build.VERSION.SDK_INT >= 21) CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
         webView.addJavascriptInterface(new JsBridge(), "DSB");
@@ -623,8 +678,23 @@ public class MainActivity extends Activity {
             }
         });
         webView.setWebChromeClient(new WebChromeClient());
-        webView.setBackgroundColor(0);
+        // 用主题底色兜底，避免深色模式下网页加载前闪白
+        webView.setBackgroundColor(theme.dark ? 0xFF0E1116 : 0xFFFFFFFF);
         webView.loadUrl(DS_URL);
+    }
+
+    /** 让 DeepSeek 网页跟随系统深色/浅色：API33 用算法变暗开关，旧版用 setForceDark。 */
+    @SuppressWarnings("deprecation")
+    private void applyWebDark(WebSettings s) {
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                s.setAlgorithmicDarkeningAllowed(theme.dark);
+            } else if (Build.VERSION.SDK_INT >= 29) {
+                s.setForceDark(theme.dark ? WebSettings.FORCE_DARK_ON : WebSettings.FORCE_DARK_OFF);
+            }
+        } catch (Throwable t) {
+            Util.log("WebView 深色设置失败: " + t.getMessage());
+        }
     }
 
     private void loadBridgeJs() {
@@ -938,6 +1008,112 @@ public class MainActivity extends Activity {
 
     private void showPromptPreview() { showText("下一次发送的 Prompt（预览）", ConversationEngine.get(this).previewPrompt()); }
 
+    // ---------------- Prompt 工程：所有发给 AI 的模板都可编辑/回退 ----------------
+
+    private void showPromptStudio() {
+        final AlertDialog[] holder = new AlertDialog[1];
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(10), dp(16), dp(8));
+        scroll.addView(box);
+
+        TextView intro = new TextView(this);
+        intro.setText("下面每一段都会按顺序拼进发给 DeepSeek 的 Prompt。内置默认已打磨好，一般无需改动；点「编辑」可自定义，点「恢复默认」可单独回退。");
+        intro.setTextSize(12f);
+        intro.setTextColor(theme.textSub());
+        intro.setLineSpacing(dp(3), 1f);
+        box.addView(intro);
+        box.addView(spacer(dp(8)));
+
+        for (final Prompts.Section sec : Prompts.SECTIONS) {
+            LinearLayout card = card();
+            card.setPadding(dp(12), dp(10), dp(12), dp(10));
+            TextView name = new TextView(this);
+            name.setText(sec.title);
+            name.setTextSize(13.5f);
+            name.setTypeface(Typeface.DEFAULT_BOLD);
+            name.setTextColor(theme.text());
+            card.addView(name);
+            String cur = prefs().getString(sec.key, sec.def);
+            TextView meta = new TextView(this);
+            meta.setText(sec.hint + "\n当前 " + cur.length() + " 字" + (cur.equals(sec.def) ? " · 默认" : " · 已自定义"));
+            meta.setTextSize(11f);
+            meta.setTextColor(theme.textSub());
+            meta.setPadding(0, dp(3), 0, dp(8));
+            card.addView(meta);
+            LinearLayout ops = new LinearLayout(this);
+            ops.setOrientation(LinearLayout.HORIZONTAL);
+            Button edit = smallBtn("✏ 编辑");
+            edit.setOnClickListener(v -> editPromptSection(sec));
+            Button reset = smallBtn("↺ 恢复默认");
+            reset.setOnClickListener(v -> {
+                prefs().edit().remove(sec.key).apply();
+                if (holder[0] != null) holder[0].dismiss();
+                toast("已恢复默认：" + sec.title);
+                showPromptStudio();
+            });
+            LinearLayout.LayoutParams olp = new LinearLayout.LayoutParams(0, -2, 1f);
+            olp.rightMargin = dp(6);
+            ops.addView(edit, olp);
+            ops.addView(reset, new LinearLayout.LayoutParams(0, -2, 1f));
+            card.addView(ops);
+            box.addView(card);
+        }
+
+        LinearLayout bottom = new LinearLayout(this);
+        bottom.setOrientation(LinearLayout.HORIZONTAL);
+        bottom.setPadding(0, dp(10), 0, dp(4));
+        Button allReset = smallBtn("↺ 全部恢复默认");
+        allReset.setOnClickListener(v -> dialogBuilder().setTitle("恢复全部默认 Prompt？")
+                .setMessage("人设、微信规则、多条消息规则、总结模板都将回到内置默认值。")
+                .setPositiveButton("恢复", (d, w) -> {
+                    ConversationEngine.get(this).resetAllPrompts();
+                    toast("已全部恢复默认");
+                }).setNegativeButton("取消", null).show());
+        Button preview = smallBtn("👁 预览完整 Prompt");
+        preview.setOnClickListener(v -> showPromptPreview());
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(0, -2, 1f);
+        blp.rightMargin = dp(6);
+        bottom.addView(allReset, blp);
+        bottom.addView(preview, new LinearLayout.LayoutParams(0, -2, 1f));
+        box.addView(bottom);
+
+        holder[0] = dialogBuilder().setTitle("📝 Prompt 工程（透明可控）").setView(scroll)
+                .setPositiveButton("关闭", null).create();
+        holder[0].show();
+    }
+
+    private void editPromptSection(final Prompts.Section sec) {
+        final EditText et = new EditText(this);
+        et.setText(prefs().getString(sec.key, sec.def));
+        et.setGravity(android.view.Gravity.TOP);
+        et.setTextSize(12f);
+        et.setTypeface(Typeface.MONOSPACE);
+        et.setMinLines(8);
+        et.setPadding(dp(10), dp(8), dp(10), dp(8));
+        ScrollView sv = new ScrollView(this);
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setPadding(dp(14), dp(8), dp(14), 0);
+        TextView hint = new TextView(this);
+        hint.setText(sec.hint);
+        hint.setTextSize(11f);
+        hint.setTextColor(theme.textSub());
+        hint.setPadding(0, 0, 0, dp(6));
+        wrap.addView(hint);
+        wrap.addView(et);
+        sv.addView(wrap);
+        dialogBuilder().setTitle(sec.title).setView(sv)
+                .setNeutralButton("填入默认", (d, w) -> et.setText(sec.def))
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", (d, w) -> {
+                    String val = et.getText().toString();
+                    prefs().edit().putString(sec.key, val.trim().isEmpty() ? sec.def : val).apply();
+                    toast("已保存：" + sec.title);
+                }).show();
+    }
+
     private void showText(String title, String body) {
         TextView t = new TextView(this);
         t.setTextSize(12f);
@@ -1037,22 +1213,20 @@ public class MainActivity extends Activity {
     private void showHelp() {
         String text = "【首次使用】\n" +
                 "1. 切到「对话页」登录 DeepSeek，手动选好模式与 DeepThink、联网开关\n" +
-                "2. 回到控制台点「连接微信」，扫码授权 ClawBot\n" +
-                "3. 在微信里找 ClawBot 联系人直接聊天，也可直接发图片/文件\n\n" +
+                "2. 回到控制台点「连接微信」，扫码授权 ClawBot（一次即可，覆盖更新不会丢登录）\n" +
+                "3. 在微信里找 ClawBot 直接聊天，也可直接发图片/文件\n\n" +
+                "【界面与深色】\n全屏沉浸显示；控制台与 DeepSeek 网页都会跟随系统在浅色/深色间切换，切系统主题即可。\n\n" +
+                "【Prompt 工程】\n控制台「Prompt工程」里可逐段编辑：角色人设（默认 DeepSeek 娘）、微信规则（原生表情与[烟花][炸弹][爆竹]全屏彩蛋）、多条消息规则、记忆总结模板，全部透明可控，可单独或一键恢复默认，并能预览最终 Prompt。\n\n" +
                 "【图片/文件传输】\n" +
-                "在微信里给 ClawBot 发送图片或文件（PDF/Word/Excel/TXT/代码/图片等），App 会自动从微信下载解密、注入 DeepSeek 官网输入区并随你的文字一起发送；可配一句问题，如「总结一下这个文件」。/文件开|关 可控制总开关。\n\n" +
+                "微信发图片或文件（PDF/Word/Excel/TXT/代码/图片等），App 自动下载解密、注入 DeepSeek 官网输入区并随文字发送；可配一句问题，如「总结一下这个文件」。/文件开|关 控制总开关。\n\n" +
                 "【收不到回复怎么排查】\n" +
-                "1. 看控制台「运行状态」：轮询是否运行、上次收到/回复时间\n" +
+                "1. 看「运行状态」：轮询是否运行、上次收到/回复时间\n" +
                 "2. 点「自检诊断」逐项检查（令牌/轮询/登录/输入框/电池白名单）\n" +
-                "3. 看运行日志，微信发 /状态 查看统计\n\n" +
-                "【工作原理】\n" +
-                "微信消息（含附件下载解密）→ 本地构造 Prompt（人设+时间+记忆摘要+上下文窗口+多条规则）→ 附件注入官网文件框、文本自动填入并发送 → 截取回复（思考过滤、撤回拦截）→ 拆分多条 → 发回微信\n\n" +
-                "【多条消息】\n" +
-                "快捷开关（或微信 /多条开|关）。AI 用单个反斜杠 \\ 分隔多条回复，App 依次发送；反斜杠后跟小写字母（如 LaTeX \\frac）不会被误拆。\n\n" +
+                "3. 看运行日志，微信发 /状态\n\n" +
                 "【长期记忆】\n" +
-                "超过阈值自动把更早的对话压缩成摘要（篇幅按信息量自适应，上限可在「更多设置」调整，默认最多 3000 字）；可手动压缩、查看、清空，达到轮数阈值自动 New chat 轮换并保留摘要。\n\n" +
-                "【后台保活】\n电池白名单 + 前台服务 + WakeLock + 屏幕常亮；返回键退到后台不会关闭桥接。\n\n" +
-                "【微信指令】\n/帮助 /状态 /压缩 /重置 /人设 新人设 /多条开 /多条关 /文件开 /文件关";
+                "超过阈值自动压缩更早对话为摘要（篇幅自适应，上限在「更多设置」调，默认最多 3000 字）；达到轮数阈值自动 New chat 轮换并保留摘要。\n\n" +
+                "【后台保活】\n前台服务 + WakeLock + 电池白名单 + 9 分钟心跳 + 看门狗自愈 + 开机自启 + 划掉重启；请在系统设置里允许本应用后台运行、关闭省电限制，效果最佳。\n\n" +
+                "【微信指令】\n/帮助 /状态 /压缩 /重置 /人设 新人设 /多条开|关 /文件开|关";
         TextView t = new TextView(this);
         t.setTextSize(13f);
         t.setTextColor(theme.text());

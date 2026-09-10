@@ -102,7 +102,45 @@ public class BotService extends Service {
         else startForeground(NOTIF_ID, n);
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DeepBridge::bot");
-        wakeLock.acquire();
+        wakeLock.setReferenceCounted(false);
+        wakeLock.acquire(/* 最长持有 24h，防止泄漏；心跳会续期 */ 24 * 60 * 60 * 1000L);
+        KeepAlive.scheduleHeartbeat(this);
+        startWatchdog();
+    }
+
+    /** 看门狗：轮询卡死/线程意外退出时自愈，避免后台久了不再收消息。 */
+    private final Handler watchdog = new Handler(Looper.getMainLooper());
+    private final Runnable watchdogTask = new Runnable() {
+        @Override public void run() {
+            try {
+                boolean threadDead = pollThread == null || !pollThread.isAlive();
+                long since = lastPollOk == 0 ? 0 : System.currentTimeMillis() - lastPollOk;
+                if (running.get() && (threadDead || (since > 150000L))) {
+                    Util.log("看门狗触发自愈: threadDead=" + threadDead + " sincePoll=" + since + "ms");
+                    if (pollThread != null) pollThread.interrupt();
+                    pollThread = new Thread(BotService.this::pollLoop, "ilink-poll");
+                    pollThread.start();
+                }
+                if (wakeLock != null && !wakeLock.isHeld() && running.get()) {
+                    wakeLock.acquire(24 * 60 * 60 * 1000L);
+                }
+            } catch (Exception e) {
+                Util.log("看门狗异常: " + e.getMessage());
+            }
+            watchdog.postDelayed(this, 60000L);
+        }
+    };
+
+    private void startWatchdog() {
+        watchdog.removeCallbacks(watchdogTask);
+        watchdog.postDelayed(watchdogTask, 60000L);
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        // 用户从最近任务划掉：安排 1 秒后重启，配合 stopWithTask=false 尽量不断桥
+        KeepAlive.scheduleServiceRestart(this, 1000L);
+        super.onTaskRemoved(rootIntent);
     }
 
     @Override
@@ -118,6 +156,7 @@ public class BotService extends Service {
         if (token == null || token.isEmpty()) {
             updateState("未连接（请扫码）");
             Util.log("无 bot_token，请先扫码连接微信");
+            KeepAlive.cancelHeartbeat(this);
             stopSelf();
             return START_REDELIVER_INTENT;
         }
@@ -126,13 +165,17 @@ public class BotService extends Service {
             pollThread.start();
             Util.log("iLink 轮询已启动");
         }
+        KeepAlive.scheduleHeartbeat(this); // 每次被拉起都续期心跳
         return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
+        boolean intentionalStop = getSharedPreferences("deepbridge", MODE_PRIVATE)
+                .getString("ilink_token", null) == null;
         running.set(false);
         pollAlive = false;
+        watchdog.removeCallbacks(watchdogTask);
         if (pollThread != null) pollThread.interrupt();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         maintenanceExec.shutdownNow();
@@ -140,6 +183,9 @@ public class BotService extends Service {
             for (ExecutorService e : userExecutors.values()) e.shutdownNow();
             userExecutors.clear();
         }
+        // 只有用户主动断开（令牌被清）才彻底停；否则（系统回收）安排重启
+        if (intentionalStop) KeepAlive.cancelHeartbeat(this);
+        else KeepAlive.scheduleServiceRestart(this, 3000L);
         super.onDestroy();
     }
 

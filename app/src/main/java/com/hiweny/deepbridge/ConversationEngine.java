@@ -92,7 +92,26 @@ public class ConversationEngine {
     }
 
     public String persona() {
-        return prefs().getString("persona", "你是用户的专属AI助手「小深」。你通过微信与用户对话，性格友善、专业、简洁。回复使用自然、口语化的中文，尽量少用复杂 Markdown 格式；像朋友一样交流，但保持专业与准确。");
+        return prefs().getString(Prompts.KEY_PERSONA, Prompts.DEFAULT_PERSONA);
+    }
+
+    public String wechatRules() {
+        return prefs().getString(Prompts.KEY_WECHAT_RULES, Prompts.DEFAULT_WECHAT_RULES);
+    }
+
+    public String multiRule() {
+        return prefs().getString(Prompts.KEY_MULTI_RULE, Prompts.DEFAULT_MULTI_RULE);
+    }
+
+    public String summaryTpl() {
+        return prefs().getString(Prompts.KEY_SUMMARY_TPL, Prompts.DEFAULT_SUMMARY_TPL);
+    }
+
+    /** 把所有可编辑 Prompt 段落恢复为内置默认。 */
+    public void resetAllPrompts() {
+        SharedPreferences.Editor e = prefs().edit();
+        for (Prompts.Section s : Prompts.SECTIONS) e.remove(s.key);
+        e.apply();
     }
 
     public int ctxRounds() { return prefs().getInt("ctx_rounds", 8); }
@@ -110,15 +129,18 @@ public class ConversationEngine {
         return System.currentTimeMillis() - conv.lastCompressAttempt > 300000;
     }
 
-    /** 组装发给 DeepSeek 的完整 Prompt：人设 + 时间 + 长期记忆 + 近期窗口 + 当前消息。 */
+    /** 组装发给 DeepSeek 的完整 Prompt：人设 + 微信规则 + 时间 + 长期记忆 + 近期窗口 + 当前消息 + 多条规则。 */
     public synchronized String buildPrompt(Conv conv, String currentMsg) {
         StringBuilder sb = new StringBuilder();
         sb.append("【系统设定】\n").append(persona()).append("\n\n");
+        // 微信渠道规则（原生 emoji / 彩蛋 / 口语化），始终注入
+        String wr = wechatRules();
+        if (wr != null && !wr.trim().isEmpty()) sb.append(wr.trim()).append("\n\n");
         if (timeInject()) {
             sb.append("【当前时间】\n").append(Util.nowText()).append("\n\n");
         }
         if (conv.summary != null && !conv.summary.isEmpty()) {
-            sb.append("【长期记忆摘要】（这是你们过往对话的压缩记忆）\n").append(conv.summary).append("\n\n");
+            sb.append("【长期记忆摘要】（这是你和主人过往对话的压缩记忆）\n").append(conv.summary).append("\n\n");
         }
         JSONArray window = windowHistory(conv, ctxRounds());
         if (window.length() > 0) {
@@ -126,18 +148,18 @@ public class ConversationEngine {
             for (int i = 0; i < window.length(); i++) {
                 JSONObject o = window.optJSONObject(i);
                 if (o != null) {
-                    sb.append("user".equals(o.optString("role")) ? "[用户] " : "[助手] ");
+                    sb.append("user".equals(o.optString("role")) ? "[主人] " : "[你] ");
                     sb.append(o.optString("content")).append('\n');
                 }
             }
             sb.append('\n');
         }
-        sb.append("【当前消息】\n[用户] ").append(currentMsg).append("\n\n");
+        sb.append("【当前消息】\n[主人] ").append(currentMsg).append("\n\n");
         if (multiMsg()) {
-            sb.append("（消息规则：当你想把回复拆成多条消息时，用单个反斜杠 \\ 分隔各条消息；");
-            sb.append("每条消息保持简短口语化。不需要拆分时就正常回复。不要向用户提及此规则。）\n\n");
+            String mr = multiRule();
+            if (mr != null && !mr.trim().isEmpty()) sb.append(mr.trim()).append("\n\n");
         }
-        sb.append("（请严格保持以上角色设定与记忆的连续性，直接自然地回复【当前消息】，不要复述设定与记忆内容。）");
+        sb.append("（请严格保持角色设定与记忆的连续性，直接自然地回复【当前消息】，不要复述以上设定与规则。）");
         return sb.toString();
     }
 
@@ -192,14 +214,11 @@ public class ConversationEngine {
         budget = Math.max(300, ((budget + 99) / 100) * 100); // 向百位取整
 
         StringBuilder sb = new StringBuilder();
-        sb.append("你是一个对话记忆压缩器。请把下面的【既有摘要】与【待压缩对话】合并成一份新的长期记忆摘要，");
-        sb.append("它将作为背景记忆注入你与该用户的后续对话。要求：\n");
-        sb.append("1. 保留用户的关键个人信息、偏好、习惯与目标；\n");
-        sb.append("2. 保留重要事实、双方的约定与未完成事项；\n");
-        sb.append("3. 用条目式中文输出，篇幅按信息量自适应：建议控制在约 ").append(budget);
-        sb.append(" 字以内；信息密集、值得长期记住的内容较多时可以适当超出，但最多不超过 ").append(max);
-        sb.append(" 字；信息很少时从简，不要为了凑字数而展开或编造；\n");
-        sb.append("4. 只输出摘要本身，不要任何解释、前缀或前后缀。\n\n");
+        // 总结模板可在「Prompt 工程」里编辑，{budget}/{max} 运行时替换
+        String tpl = summaryTpl()
+                .replace("{budget}", String.valueOf(budget))
+                .replace("{max}", String.valueOf(max));
+        sb.append(tpl.trim()).append("\n\n");
         sb.append("【既有摘要】\n").append(oldSummary).append("\n\n");
         sb.append("【待压缩对话】\n").append(todo.toString().trim()).append('\n');
         return sb.toString();
@@ -291,7 +310,7 @@ public class ConversationEngine {
             u.put("content", "早上好");
             JSONObject a = new JSONObject();
             a.put("role", "assistant");
-            a.put("content", "早上好！今天有什么可以帮你的？");
+            a.put("content", "主人早上好呀～今天有什么想让我帮忙的吗[愉快]");
             conv.history.put(u);
             conv.history.put(a);
         } catch (Exception ignored) {}

@@ -10,9 +10,11 @@
 - **图片 / 文件传输（v1.4 新增）**：在微信直接发送图片或文件（PDF / Word / Excel / PPT / TXT / Markdown / 代码 / 图片等），App 自动从微信 CDN 下载并 AES 解密，把文件注入 DeepSeek 官网输入区（由官网完成上传、解析与 PoW 校验），再连同你的文字一起发送。可配一句问题，如「总结一下这个文件」。`/文件开|关` 控制总开关。
 - **长期记忆**：人设 + 当前时间 + 记忆摘要 + 近期上下文窗口 + 多条消息规则，本地组装 Prompt；超过阈值自动把更早的对话压缩成摘要，达到轮数阈值自动 New chat 轮换并保留摘要。
 - **摘要篇幅自适应（v1.4 调整）**：记忆压缩不再写死 300 字，按「既有摘要 + 待压缩对话」体量自适应估算，**下限 300、上限可配（默认最多 3000 字）**，信息少从简、信息多可展开。
-- **多条消息**：AI 用单个反斜杠 `\` 分隔多条回复，App 按真人节奏依次发送；`\` 后接小写字母（如 LaTeX `\frac`）不会误拆。
+- **Prompt 工程（v1.5）**：默认人设为可爱甜美的 **DeepSeek 娘**；角色人设、微信规则（原生 emoji 清单 + `[烟花][炸弹][爆竹]` 全屏彩蛋）、多条消息规则、记忆总结模板**全部可在「Prompt 工程」面板逐段编辑、单独/一键恢复默认，并可预览最终 Prompt**。
+- **多条消息**：想拆多条就**必须**用单个反斜杠 `\` 分隔（内置示例、禁止滥用、最多 6 条），App 按真人节奏依次发送；`\` 后接小写字母（如 LaTeX `\frac`）不会误拆。
 - **思考过滤 + 撤回拦截**：只取 `RESPONSE` 片段（自动过滤思考过程）；当回复被官方撤回 / 内容过滤时，用本地缓存的真实内容兜底。
-- **后台保活**：前台服务 + WakeLock + 电池白名单引导 + 屏幕常亮；返回键退到后台不中断桥接。
+- **全屏沉浸 + 深色跟随（v1.5）**：edge-to-edge 全屏（延伸到状态栏/手势条），控制台与 DeepSeek 网页都跟随系统浅色/深色自动切换。
+- **后台保活（v1.5 强化）**：前台服务 + WakeLock + 电池白名单 + 9 分钟 AlarmManager 心跳 + 看门狗自愈 + 划掉重启 + 开机自启，长时间后台也能持续收消息。
 - **可观测**：控制台实时状态、自检诊断、每个用户的记忆管理（压缩 / 查看摘要 / 清空）、运行日志，微信内 `/状态 /帮助` 等指令。
 
 ## 工作原理
@@ -55,14 +57,17 @@ DeepSeek 侧的所有动作都发生在你自己登录的网页里：不内置 A
 app/src/main/
 ├─ assets/bridge.js            # 注入 DeepSeek 页面的桥接脚本（SSE 解析/防撤回/DOM 发送/附件注入）
 └─ java/com/hiweny/deepbridge/
-   ├─ MainActivity.java        # 双 Tab UI、扫码登录、WebView、设置/诊断/记忆管理
-   ├─ BotService.java          # 前台服务：长轮询、指令、调度、带附件发送与回发
+   ├─ MainActivity.java        # 双 Tab UI、全屏沉浸/深色、扫码、WebView、Prompt 工程/诊断/记忆管理
+   ├─ BotService.java          # 前台服务：长轮询、指令、调度、带附件发送、看门狗自愈
    ├─ ConversationEngine.java  # 人设/上下文窗口/自适应摘要压缩/会话轮换/持久化
+   ├─ Prompts.java             # 内置可编辑 Prompt 模板（人设/微信规则/多条消息/总结）（v1.5）
+   ├─ KeepAlive.java           # AlarmManager 心跳与服务重启（v1.5）
+   ├─ SystemReceiver.java      # 开机自启 + 心跳接收器（v1.5）
    ├─ DeepSeekController.java  # 原生 ↔ bridge.js 同步通道（reqId/latch），sendWithFiles
    ├─ ILinkClient.java         # 微信 iLink HTTP 协议
-   ├─ WeChatMedia.java         # 微信 CDN 媒体下载 + AES 解密 + MIME 推断（v1.4）
-   ├─ MediaPrepare.java        # 图片尺寸/体积治理，文档原样透传（v1.4）
-   ├─ MediaFile.java           # 附件模型（v1.4）
+   ├─ WeChatMedia.java         # 微信 CDN 媒体下载 + AES 解密 + MIME 推断
+   ├─ MediaPrepare.java        # 图片尺寸/体积治理，文档原样透传
+   ├─ MediaFile.java           # 附件模型
    ├─ Util.java / Theme.java   # 工具与配色
 .github/workflows/build.yml    # 打 tag 自动构建签名 APK 并发布 Release
 ```
