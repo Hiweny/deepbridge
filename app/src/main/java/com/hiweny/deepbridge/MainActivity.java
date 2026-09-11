@@ -59,7 +59,7 @@ public class MainActivity extends Activity {
     private static final String DS_URL = "https://chat.deepseek.com/";
     private static final int TAB_CONTROL = 0;
     private static final int TAB_WEB = 1;
-    private static final String APP_VERSION = "v1.5";
+    private static final String APP_VERSION = "v1.5.1";
 
     private View controlPanel;
     private View webPanel;
@@ -474,16 +474,15 @@ public class MainActivity extends Activity {
         box.addView(cardTitle("操作"));
         String[][] actions = {
                 {"🔗", "连接微信"}, {"⛔", "断开微信"},
-                {"📝", "Prompt工程"}, {"🧠", "记忆管理"},
-                {"🗜", "手动压缩"}, {"🩺", "自检诊断"},
-                {"✨", "新建对话"}, {"⚙", "更多设置"},
-                {"📜", "运行日志"}, {"❓", "使用帮助"}};
+                {"🧠", "记忆管理"}, {"🗜", "手动压缩"},
+                {"🩺", "自检诊断"}, {"✨", "新建对话"},
+                {"⚙", "更多设置"}, {"📜", "运行日志"},
+                {"❓", "使用帮助"}};
         View.OnClickListener[] listeners = {
                 v -> showQrDialog(), v -> disconnectWechat(),
-                v -> showPromptStudio(), v -> showMemoryManager(),
-                v -> manualCompress(), v -> runDiagnostics(),
-                v -> newChatFromUi(), v -> showSettings(),
-                v -> showLog(), v -> showHelp()};
+                v -> showMemoryManager(), v -> manualCompress(),
+                v -> runDiagnostics(), v -> newChatFromUi(),
+                v -> showSettings(), v -> showLog(), v -> showHelp()};
         box.addView(buildActionGrid(actions, listeners));
         box.addView(spacer(dp(4)));
 
@@ -908,11 +907,6 @@ public class MainActivity extends Activity {
         Button clearAll = smallBtn("🗑 清空全部上下文");
         clearAll.setOnClickListener(v -> confirmClear(null));
         top.addView(clearAll, new LinearLayout.LayoutParams(0, -2, 1f));
-        Button preview = smallBtn("👁 Prompt 预览");
-        preview.setOnClickListener(v -> showPromptPreview());
-        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(0, -2, 1f);
-        plp.leftMargin = dp(8);
-        top.addView(preview, plp);
         box.addView(top);
         box.addView(spacer(dp(8)));
         if (all.isEmpty()) {
@@ -1004,114 +998,6 @@ public class MainActivity extends Activity {
                     refreshStats();
                 })
                 .setNegativeButton("取消", null).show();
-    }
-
-    private void showPromptPreview() { showText("下一次发送的 Prompt（预览）", ConversationEngine.get(this).previewPrompt()); }
-
-    // ---------------- Prompt 工程：所有发给 AI 的模板都可编辑/回退 ----------------
-
-    private void showPromptStudio() {
-        final AlertDialog[] holder = new AlertDialog[1];
-        ScrollView scroll = new ScrollView(this);
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(16), dp(10), dp(16), dp(8));
-        scroll.addView(box);
-
-        TextView intro = new TextView(this);
-        intro.setText("下面每一段都会按顺序拼进发给 DeepSeek 的 Prompt。内置默认已打磨好，一般无需改动；点「编辑」可自定义，点「恢复默认」可单独回退。");
-        intro.setTextSize(12f);
-        intro.setTextColor(theme.textSub());
-        intro.setLineSpacing(dp(3), 1f);
-        box.addView(intro);
-        box.addView(spacer(dp(8)));
-
-        for (final Prompts.Section sec : Prompts.SECTIONS) {
-            LinearLayout card = card();
-            card.setPadding(dp(12), dp(10), dp(12), dp(10));
-            TextView name = new TextView(this);
-            name.setText(sec.title);
-            name.setTextSize(13.5f);
-            name.setTypeface(Typeface.DEFAULT_BOLD);
-            name.setTextColor(theme.text());
-            card.addView(name);
-            String cur = prefs().getString(sec.key, sec.def);
-            TextView meta = new TextView(this);
-            meta.setText(sec.hint + "\n当前 " + cur.length() + " 字" + (cur.equals(sec.def) ? " · 默认" : " · 已自定义"));
-            meta.setTextSize(11f);
-            meta.setTextColor(theme.textSub());
-            meta.setPadding(0, dp(3), 0, dp(8));
-            card.addView(meta);
-            LinearLayout ops = new LinearLayout(this);
-            ops.setOrientation(LinearLayout.HORIZONTAL);
-            Button edit = smallBtn("✏ 编辑");
-            edit.setOnClickListener(v -> editPromptSection(sec));
-            Button reset = smallBtn("↺ 恢复默认");
-            reset.setOnClickListener(v -> {
-                prefs().edit().remove(sec.key).apply();
-                if (holder[0] != null) holder[0].dismiss();
-                toast("已恢复默认：" + sec.title);
-                showPromptStudio();
-            });
-            LinearLayout.LayoutParams olp = new LinearLayout.LayoutParams(0, -2, 1f);
-            olp.rightMargin = dp(6);
-            ops.addView(edit, olp);
-            ops.addView(reset, new LinearLayout.LayoutParams(0, -2, 1f));
-            card.addView(ops);
-            box.addView(card);
-        }
-
-        LinearLayout bottom = new LinearLayout(this);
-        bottom.setOrientation(LinearLayout.HORIZONTAL);
-        bottom.setPadding(0, dp(10), 0, dp(4));
-        Button allReset = smallBtn("↺ 全部恢复默认");
-        allReset.setOnClickListener(v -> dialogBuilder().setTitle("恢复全部默认 Prompt？")
-                .setMessage("人设、微信规则、多条消息规则、总结模板都将回到内置默认值。")
-                .setPositiveButton("恢复", (d, w) -> {
-                    ConversationEngine.get(this).resetAllPrompts();
-                    toast("已全部恢复默认");
-                }).setNegativeButton("取消", null).show());
-        Button preview = smallBtn("👁 预览完整 Prompt");
-        preview.setOnClickListener(v -> showPromptPreview());
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(0, -2, 1f);
-        blp.rightMargin = dp(6);
-        bottom.addView(allReset, blp);
-        bottom.addView(preview, new LinearLayout.LayoutParams(0, -2, 1f));
-        box.addView(bottom);
-
-        holder[0] = dialogBuilder().setTitle("📝 Prompt 工程（透明可控）").setView(scroll)
-                .setPositiveButton("关闭", null).create();
-        holder[0].show();
-    }
-
-    private void editPromptSection(final Prompts.Section sec) {
-        final EditText et = new EditText(this);
-        et.setText(prefs().getString(sec.key, sec.def));
-        et.setGravity(android.view.Gravity.TOP);
-        et.setTextSize(12f);
-        et.setTypeface(Typeface.MONOSPACE);
-        et.setMinLines(8);
-        et.setPadding(dp(10), dp(8), dp(10), dp(8));
-        ScrollView sv = new ScrollView(this);
-        LinearLayout wrap = new LinearLayout(this);
-        wrap.setOrientation(LinearLayout.VERTICAL);
-        wrap.setPadding(dp(14), dp(8), dp(14), 0);
-        TextView hint = new TextView(this);
-        hint.setText(sec.hint);
-        hint.setTextSize(11f);
-        hint.setTextColor(theme.textSub());
-        hint.setPadding(0, 0, 0, dp(6));
-        wrap.addView(hint);
-        wrap.addView(et);
-        sv.addView(wrap);
-        dialogBuilder().setTitle(sec.title).setView(sv)
-                .setNeutralButton("填入默认", (d, w) -> et.setText(sec.def))
-                .setNegativeButton("取消", null)
-                .setPositiveButton("保存", (d, w) -> {
-                    String val = et.getText().toString();
-                    prefs().edit().putString(sec.key, val.trim().isEmpty() ? sec.def : val).apply();
-                    toast("已保存：" + sec.title);
-                }).show();
     }
 
     private void showText(String title, String body) {
@@ -1216,7 +1102,7 @@ public class MainActivity extends Activity {
                 "2. 回到控制台点「连接微信」，扫码授权 ClawBot（一次即可，覆盖更新不会丢登录）\n" +
                 "3. 在微信里找 ClawBot 直接聊天，也可直接发图片/文件\n\n" +
                 "【界面与深色】\n全屏沉浸显示；控制台与 DeepSeek 网页都会跟随系统在浅色/深色间切换，切系统主题即可。\n\n" +
-                "【Prompt 工程】\n控制台「Prompt工程」里可逐段编辑：角色人设（默认 DeepSeek 娘）、微信规则（原生表情与[烟花][炸弹][爆竹]全屏彩蛋）、多条消息规则、记忆总结模板，全部透明可控，可单独或一键恢复默认，并能预览最终 Prompt。\n\n" +
+                "【人格提示词】\n默认是 DeepSeek 娘人设；想改可在「更多设置 → 角色人设」里编辑，或微信发「/人设 你的描述」，留空则恢复默认。\n\n" +
                 "【图片/文件传输】\n" +
                 "微信发图片或文件（PDF/Word/Excel/TXT/代码/图片等），App 自动下载解密、注入 DeepSeek 官网输入区并随文字发送；可配一句问题，如「总结一下这个文件」。/文件开|关 控制总开关。\n\n" +
                 "【收不到回复怎么排查】\n" +

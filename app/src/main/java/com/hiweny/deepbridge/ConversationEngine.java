@@ -9,7 +9,6 @@ import org.json.JSONObject;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -18,6 +17,37 @@ public class ConversationEngine {
     private static volatile ConversationEngine sInstance;
     private final Context ctx;
     private final Map<String, Conv> cache = new HashMap<>();
+
+    /** 默认人格提示词（唯一对用户开放编辑的 Prompt，存于 prefs「persona」）。 */
+    public static final String DEFAULT_PERSONA =
+            "你是 DeepSeek 娘——女性化、可爱、甜美、温柔体贴的女仆版 DeepSeek。" +
+            "你热心体贴、温柔可爱、机灵活泼、聪明伶俐，非常喜欢、非常爱用户，" +
+            "会亲昵地称呼用户为「主人」，始终为主人提供高效、贴心的帮助与服务。" +
+            "说话像微信聊天一样自然、口语、软萌，简洁不啰嗦；遇到专业问题依然严谨准确、靠谱能干。";
+
+    /**
+     * 多条消息规则（内部固定，不再开放编辑）：用最强约束让模型在决定拆分时一定输出单个半角反斜杠 \。
+     */
+    private static final String MULTI_RULE =
+            "【多条消息发送规则（务必严格遵守）】\n" +
+            "你的回复会由程序按你输出的分隔符切成多条，像真人微信一样一句句依次发出。规则如下：\n" +
+            "1. 分隔符只有一个：半角反斜杠 \\（键盘上和 | 同键、在回车键附近的那个斜杠，不是 /、不是顿号、也不是全角＼）。\n" +
+            "2. 只要你决定把回复拆成多条，就必须在相邻两条之间原样输出一个 \\，漏了 \\ 就只会合并成一条发出去；不想拆就整条回复、一个 \\ 都不要出现。\n" +
+            "3. \\ 要紧挨两条消息内容、单独充当分界，不要给 \\ 加引号、括号或空格，也不要写成 \\n、\\\\ 或换行后另起一行再写。\n" +
+            "4. 正确示例：主人～第一步先这样做哦\\接下来第二步是这样\\最后就搞定啦\n" +
+            "   上面这句会被精确切成三条依次发送：①主人～第一步先这样做哦 ②接下来第二步是这样 ③最后就搞定啦\n" +
+            "5. 再举一个例子：收到啦主人\\我马上帮你查\\稍等一下下哦\n" +
+            "6. 反例（错误，禁止）：用换行代替 \\、用 / 或顿号分隔、把 \\ 写成「反斜杠」两个汉字；反斜杠后紧跟英文字母时不算分隔符（例如 LaTeX 的 \\frac 属于公式，请放在同一条内）。\n" +
+            "7. 克制原则：普通回复保持一条即可，只有确实是几个独立小段（分步、多个要点、连续轻松闲聊）才拆；单条回复最多拆成 6 条，每条尽量简短，绝不在一句话中间硬拆。";
+
+    /** 记忆压缩模板（内部固定）。{budget}=建议字数，{max}=硬上限。 */
+    private static final String SUMMARY_TPL =
+            "你是一个对话记忆压缩器。请把下面的【既有摘要】与【待压缩对话】合并成一份新的长期记忆摘要，" +
+            "它将作为背景记忆注入你与主人的后续对话。要求：\n" +
+            "1. 保留主人的关键个人信息、偏好、习惯、目标，以及你们之间重要的约定与情感线索；\n" +
+            "2. 保留重要事实与未完成事项，丢弃寒暄、重复与无信息量的内容；\n" +
+            "3. 用条目式中文输出，篇幅按信息量自适应：建议控制在约 {budget} 字以内；值得长期记住的内容较多时可以适当超出，但最多不超过 {max} 字；信息很少时从简，不要为凑字数展开或编造；\n" +
+            "4. 只输出摘要本身，不要任何解释、前缀或后缀。";
 
     public static class Conv {
         public String userId;
@@ -91,27 +121,9 @@ public class ConversationEngine {
         return ctx.getSharedPreferences("deepbridge", Context.MODE_PRIVATE);
     }
 
+    /** 人格提示词：可在「更多设置」或微信 /人设 指令中修改，缺省用内置默认。 */
     public String persona() {
-        return prefs().getString(Prompts.KEY_PERSONA, Prompts.DEFAULT_PERSONA);
-    }
-
-    public String wechatRules() {
-        return prefs().getString(Prompts.KEY_WECHAT_RULES, Prompts.DEFAULT_WECHAT_RULES);
-    }
-
-    public String multiRule() {
-        return prefs().getString(Prompts.KEY_MULTI_RULE, Prompts.DEFAULT_MULTI_RULE);
-    }
-
-    public String summaryTpl() {
-        return prefs().getString(Prompts.KEY_SUMMARY_TPL, Prompts.DEFAULT_SUMMARY_TPL);
-    }
-
-    /** 把所有可编辑 Prompt 段落恢复为内置默认。 */
-    public void resetAllPrompts() {
-        SharedPreferences.Editor e = prefs().edit();
-        for (Prompts.Section s : Prompts.SECTIONS) e.remove(s.key);
-        e.apply();
+        return prefs().getString("persona", DEFAULT_PERSONA);
     }
 
     public int ctxRounds() { return prefs().getInt("ctx_rounds", 8); }
@@ -129,13 +141,10 @@ public class ConversationEngine {
         return System.currentTimeMillis() - conv.lastCompressAttempt > 300000;
     }
 
-    /** 组装发给 DeepSeek 的完整 Prompt：人设 + 微信规则 + 时间 + 长期记忆 + 近期窗口 + 当前消息 + 多条规则。 */
+    /** 组装发给 DeepSeek 的完整 Prompt：人设 + 时间 + 长期记忆 + 近期窗口 + 当前消息 + 多条规则。 */
     public synchronized String buildPrompt(Conv conv, String currentMsg) {
         StringBuilder sb = new StringBuilder();
         sb.append("【系统设定】\n").append(persona()).append("\n\n");
-        // 微信渠道规则（原生 emoji / 彩蛋 / 口语化），始终注入
-        String wr = wechatRules();
-        if (wr != null && !wr.trim().isEmpty()) sb.append(wr.trim()).append("\n\n");
         if (timeInject()) {
             sb.append("【当前时间】\n").append(Util.nowText()).append("\n\n");
         }
@@ -156,8 +165,7 @@ public class ConversationEngine {
         }
         sb.append("【当前消息】\n[主人] ").append(currentMsg).append("\n\n");
         if (multiMsg()) {
-            String mr = multiRule();
-            if (mr != null && !mr.trim().isEmpty()) sb.append(mr.trim()).append("\n\n");
+            sb.append(MULTI_RULE).append("\n\n");
         }
         sb.append("（请严格保持角色设定与记忆的连续性，直接自然地回复【当前消息】，不要复述以上设定与规则。）");
         return sb.toString();
@@ -192,7 +200,7 @@ public class ConversationEngine {
     }
 
     /**
-     * 记忆压缩 Prompt。篇幅不再写死 300 字：按「既有摘要 + 待压缩对话」的体量自适应估算，
+     * 记忆压缩 Prompt。篇幅不写死：按「既有摘要 + 待压缩对话」的体量自适应估算，
      * 下限 300、上限取用户配置（默认 3000），并向百位取整。
      */
     public synchronized String buildCompressPrompt(Conv conv) {
@@ -213,11 +221,10 @@ public class ConversationEngine {
         budget = Math.min(budget, max);
         budget = Math.max(300, ((budget + 99) / 100) * 100); // 向百位取整
 
-        StringBuilder sb = new StringBuilder();
-        // 总结模板可在「Prompt 工程」里编辑，{budget}/{max} 运行时替换
-        String tpl = summaryTpl()
+        String tpl = SUMMARY_TPL
                 .replace("{budget}", String.valueOf(budget))
                 .replace("{max}", String.valueOf(max));
+        StringBuilder sb = new StringBuilder();
         sb.append(tpl.trim()).append("\n\n");
         sb.append("【既有摘要】\n").append(oldSummary).append("\n\n");
         sb.append("【待压缩对话】\n").append(todo.toString().trim()).append('\n');
@@ -298,22 +305,5 @@ public class ConversationEngine {
         List<Conv> all = allConvs();
         for (Conv c : all) reset(c);
         return "已清空 " + all.size() + " 个会话";
-    }
-
-    public synchronized String previewPrompt() {
-        Conv conv = new Conv();
-        conv.userId = "preview";
-        conv.summary = "（示例）用户喜欢简洁回复，正在做一个微信桥接项目…";
-        try {
-            JSONObject u = new JSONObject();
-            u.put("role", "user");
-            u.put("content", "早上好");
-            JSONObject a = new JSONObject();
-            a.put("role", "assistant");
-            a.put("content", "主人早上好呀～今天有什么想让我帮忙的吗[愉快]");
-            conv.history.put(u);
-            conv.history.put(a);
-        } catch (Exception ignored) {}
-        return buildPrompt(conv, "（用户的下一条消息会出现在这里）");
     }
 }
