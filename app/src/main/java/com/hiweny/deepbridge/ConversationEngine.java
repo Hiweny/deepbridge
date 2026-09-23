@@ -58,6 +58,8 @@ public class ConversationEngine {
         public int totalRounds = 0;
         /** 已折叠进 summary 的 leading 轮数；原始 history 始终完整保留、不裁剪。 */
         public int summarizedRounds = 0;
+        /** 上次网站会话轮换（New chat）时所处的总轮数，用于按较大间隔轮换。 */
+        public int rotatedAtRounds = 0;
         public long lastCompressAttempt = 0;
     }
 
@@ -97,6 +99,7 @@ public class ConversationEngine {
                 conv.history = j.optJSONArray("history") != null ? j.optJSONArray("history") : new JSONArray();
                 conv.totalRounds = j.optInt("totalRounds", 0);
                 conv.summarizedRounds = j.optInt("summarizedRounds", 0);
+                conv.rotatedAtRounds = j.optInt("rotatedAtRounds", 0);
             } catch (Exception e) {
                 Util.log("会话文件解析失败 " + userId + ": " + e.getMessage());
             }
@@ -115,6 +118,7 @@ public class ConversationEngine {
             j.put("history", conv.history);
             j.put("totalRounds", conv.totalRounds);
             j.put("summarizedRounds", conv.summarizedRounds);
+            j.put("rotatedAtRounds", conv.rotatedAtRounds);
             Util.writeFile(fileFor(conv.userId), j.toString());
         } catch (Exception e) {
             Util.log("保存会话失败: " + e.getMessage());
@@ -135,6 +139,11 @@ public class ConversationEngine {
      * 也是一批压缩的轮次（每攒满 N 轮新对话就折叠一批并与旧总结合并）。默认 20。
      */
     public int ctxRounds() { return Math.max(2, prefs().getInt("ctx_rounds", 20)); }
+    /**
+     * 网站会话轮换阈值 R：按“总对话轮数”计，距上次轮换累计满 R 轮才 New chat（默认 200），
+     * 以最大限度利用 DeepSeek 官网的上下文窗口、不频繁开新对话；设为 0 表示从不自动轮换、仅手动。
+     */
+    public int rotateRounds() { return Math.max(0, prefs().getInt("rotate_rounds", 200)); }
     public boolean thinkingEnabled() { return prefs().getBoolean("thinking", false); }
     public boolean timeInject() { return prefs().getBoolean("time_inject", true); }
     public boolean multiMsg() { return prefs().getBoolean("multi_msg", true); }
@@ -143,9 +152,6 @@ public class ConversationEngine {
     /** 记忆摘要的硬上限字数。 */
     public int summaryMaxChar() { return prefs().getInt("summary_max", 3000); }
 
-    public boolean compressCooldownOk(Conv conv) {
-        return System.currentTimeMillis() - conv.lastCompressAttempt > 300000;
-    }
 
     /** 组装发给 DeepSeek 的完整 Prompt：人设 + 时间 + 长期记忆 + 近期窗口 + 当前消息 + 多条规则。 */
     public synchronized String buildPrompt(Conv conv, String currentMsg) {
@@ -267,12 +273,16 @@ public class ConversationEngine {
                 + "轮，摘要 " + conv.summary.length() + " 字，原始历史保留 " + conv.history.length() + " 条");
     }
 
-    /** 仅重置 DeepSeek 网站会话（点 New chat），本地记忆、计数、历史一律保留。 */
-    public synchronized void resetWebSession(Conv conv) {
+    /**
+     * 标记网站会话已轮换（已点 New chat）：清空网站会话引用、把轮换基准记为当前总轮数；
+     * 本地记忆、摘要、历史、压缩计数一律保留。
+     */
+    public synchronized void markWebRotated(Conv conv) {
         conv.deepseekSessionId = null;
         conv.parentMsgId = null;
+        conv.rotatedAtRounds = conv.totalRounds;
         save(conv);
-        Util.log("网站会话已 New chat（本地记忆与计数保留）");
+        Util.log("网站会话已 New chat（总" + conv.totalRounds + "轮，本地记忆与计数保留）");
     }
 
     public synchronized void reset(Conv conv) {

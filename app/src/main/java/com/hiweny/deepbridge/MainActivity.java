@@ -881,6 +881,11 @@ public class MainActivity extends Activity {
         bg.submit(() -> {
             final JSONObject r = DeepSeekController.get().newChat();
             Util.log("手动新建对话: " + (r.optBoolean("ok") ? "成功" : "失败:" + r.optString("error")));
+            if (r.optBoolean("ok")) {
+                // 同步所有会话的轮换基准，避免紧接着又触发自动轮换
+                ConversationEngine eng = ConversationEngine.get(this);
+                for (ConversationEngine.Conv c : eng.allConvs()) eng.markWebRotated(c);
+            }
             runOnUiThread(() -> {
                 toast(r.optBoolean("ok") ? "已新建对话（请切到对话页确认）" : "新建失败，请切到对话页手动新建");
                 switchTab(TAB_WEB);
@@ -1032,6 +1037,12 @@ public class MainActivity extends Activity {
         TextView nHint = label("N 既是发给 AI 的可见上下文（最近 N 轮），也是一批记忆压缩的轮次：每满 N 轮自动折叠为摘要并与旧记忆合并，原始记录保留、窗口不重置。建议 20–30。");
         nHint.setTextSize(11.5f);
         box.addView(nHint);
+        final EditText rotateRounds = numberField(String.valueOf(ConversationEngine.get(this).rotateRounds()));
+        box.addView(label("网站会话轮换阈值 R（总轮数，默认 200；0=仅手动开新对话）"));
+        box.addView(rotateRounds);
+        TextView rHint = label("压缩记忆不会开新对话；只有距上次开新对话累计满 R 轮才自动 New chat，以最大限度利用 DeepSeek 官网的上下文窗口。也可用微信「/新对话」或控制台「新建对话」手动开。");
+        rHint.setTextSize(11.5f);
+        box.addView(rHint);
         final CheckBox battery = new CheckBox(this);
         battery.setText("电池优化白名单" + (isIgnoringBattery() ? "（已开启 ✓）" : "（后台保活，强烈建议开启）"));
         battery.setChecked(isIgnoringBattery());
@@ -1068,6 +1079,7 @@ public class MainActivity extends Activity {
                     prefs().edit()
                             .putString("persona", persona.getText().toString().trim())
                             .putInt("ctx_rounds", Math.max(2, parseInt(ctxRounds, 20)))
+                            .putInt("rotate_rounds", Math.max(0, parseInt(rotateRounds, 200)))
                             .apply();
                     toast("已保存");
                 })

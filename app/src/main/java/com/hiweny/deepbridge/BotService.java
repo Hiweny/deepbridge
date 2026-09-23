@@ -73,6 +73,7 @@ public class BotService extends Service {
                 "也可以直接发送图片或文件（PDF/Word/Excel/TXT/代码等），会自动上传给 DeepSeek 一起分析。\n" +
                 "指令：\n" +
                 "/帮助 - 本帮助\n/状态 - 查看桥接与记忆状态\n/压缩 - 立即压缩对话记忆\n" +
+                "/新对话 - 在 DeepSeek 官网手动开新对话（记忆保留）\n" +
                 "/重置 - 清空本用户的对话与记忆\n/人设 - 查看/修改角色人设\n" +
                 "/多条开|关 - 多条消息模式（AI 用 \\ 分隔，依次发送）\n" +
                 "/文件开|关 - 微信图片/文件转发给 DeepSeek 的总开关\n" +
@@ -361,6 +362,19 @@ public class BotService extends Service {
             reply(uid, contextToken, r);
             return;
         }
+        if (cmd.equals("/新对话") || cmd.equals("/newchat") || cmd.equals("/新建对话")) {
+            String out;
+            if (DeepSeekController.get().isBusy()) {
+                out = "AI 正在回复中，请稍等再开新对话。";
+            } else if (DeepSeekController.get().newChat().optBoolean("ok")) {
+                engine.markWebRotated(conv);
+                out = "✅ 已在 DeepSeek 官网开新对话；人设与长期记忆保留，可继续发送消息。";
+            } else {
+                out = "⚠️ 新建对话失败，请打开 App 切到对话页手动点 New chat。";
+            }
+            reply(uid, contextToken, out);
+            return;
+        }
         if (cmd.startsWith("/人设") || cmd.startsWith("人设 ")) {
             String persona = extractText.trim().replaceFirst("^/(人设|persona)\\s*", "").replaceFirst("^人设\\s*", "");
             if (persona.isEmpty()) {
@@ -472,7 +486,7 @@ public class BotService extends Service {
 
     private void postReplyMaintenance(ConversationEngine engine, ConversationEngine.Conv conv, String uid) {
         try {
-            // 滑窗记忆：每攒满 N 轮新对话，就把这一批折叠并与旧总结合并；原始历史不裁剪、窗口不重置。
+            // 1) 滑窗记忆：每攒满 N 轮新对话，就把这一批折叠并与旧总结合并；原始历史不裁剪、窗口不重置、不开新对话。
             int guard = 0;
             while (engine.countToCompress(conv, false) > 0 && guard++ < 30) {
                 int count = engine.countToCompress(conv, false);
@@ -487,12 +501,15 @@ public class BotService extends Service {
                     Util.log("自动折叠失败(" + uid + "): " + r.optString("error", "EMPTY"));
                     break;
                 }
-                // 每折叠一批就把 DeepSeek 网站会话 New chat 保持精简（含折叠产生的内部回合）；本地记忆/计数保留。
-                if (!DeepSeekController.get().isBusy()
-                        && DeepSeekController.get().newChat().optBoolean("ok")) {
-                    engine.resetWebSession(conv);
-                    Util.log("网站会话已 New chat（本地记忆保留）");
-                }
+            }
+            // 2) 网站会话轮换：仅当距上次轮换累计满 R 轮（默认 200，0=从不自动）才 New chat，
+            //    最大限度利用 DeepSeek 官网的上下文窗口，绝不因压缩而频繁开新对话；本地记忆/计数保留。
+            int R = engine.rotateRounds();
+            if (R > 0 && !DeepSeekController.get().isBusy()
+                    && conv.totalRounds - conv.rotatedAtRounds >= R
+                    && DeepSeekController.get().newChat().optBoolean("ok")) {
+                engine.markWebRotated(conv);
+                Util.log("网站会话已轮换（总" + conv.totalRounds + "轮，本地记忆保留）");
             }
         } catch (Exception e) {
             Util.log("后台维护异常: " + e.getMessage());
