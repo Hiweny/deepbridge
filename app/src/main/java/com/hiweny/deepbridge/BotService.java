@@ -47,6 +47,8 @@ public class BotService extends Service {
     public static volatile boolean serviceRunning = false;
     /** AI 当前阶段，用于常驻通知展示：等待消息 / 处理中 / DeepSeek 思考中 / 已回复。 */
     public static volatile String aiStatus = "等待消息";
+    /** 最近一次收到并派发微信消息的时间，供后台维护判断是否已有更新的消息进来、主动让路。 */
+    public static volatile long lastDispatchAt = 0L;
     private static volatile StatusUi statusUi;
 
     private String base;
@@ -287,6 +289,7 @@ public class BotService extends Service {
     private void dispatch(final JSONObject msg) {
         final String uid = msg.optString("from_user_id", "");
         if (uid.isEmpty()) return;
+        lastDispatchAt = System.currentTimeMillis();
         ExecutorService exec;
         synchronized (userExecutors) {
             exec = userExecutors.get(uid);
@@ -485,10 +488,12 @@ public class BotService extends Service {
     }
 
     private void postReplyMaintenance(ConversationEngine engine, ConversationEngine.Conv conv, String uid) {
+        final long gate = lastDispatchAt; // 触发本次维护的那条消息的派发时间
         try {
             // 1) 滑窗记忆：每攒满 N 轮新对话，就把这一批折叠并与旧总结合并；原始历史不裁剪、窗口不重置、不开新对话。
             int guard = 0;
             while (engine.countToCompress(conv, false) > 0 && guard++ < 30) {
+                if (lastDispatchAt > gate) { Util.log("已有新消息进来，延后记忆折叠"); return; } // 给新消息让路
                 int count = engine.countToCompress(conv, false);
                 conv.lastCompressAttempt = System.currentTimeMillis();
                 int from = conv.summarizedRounds;
@@ -505,6 +510,7 @@ public class BotService extends Service {
             // 2) 网站会话轮换：仅当距上次轮换累计满 R 轮（默认 200，0=从不自动）才 New chat，
             //    最大限度利用 DeepSeek 官网的上下文窗口，绝不因压缩而频繁开新对话；本地记忆/计数保留。
             int R = engine.rotateRounds();
+            if (lastDispatchAt > gate) return; // 给新消息让路
             if (R > 0 && !DeepSeekController.get().isBusy()
                     && conv.totalRounds - conv.rotatedAtRounds >= R
                     && DeepSeekController.get().newChat().optBoolean("ok")) {

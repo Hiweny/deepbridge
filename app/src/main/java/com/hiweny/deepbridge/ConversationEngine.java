@@ -100,6 +100,12 @@ public class ConversationEngine {
                 conv.totalRounds = j.optInt("totalRounds", 0);
                 conv.summarizedRounds = j.optInt("summarizedRounds", 0);
                 conv.rotatedAtRounds = j.optInt("rotatedAtRounds", 0);
+                // 加载即对账：history 是原始记录的唯一事实来源（旧版本压缩时可能裁剪过 history），
+                // 据此修正计数并钳制 summarizedRounds，避免后续批次指向已不存在的 history 区间而“压缩空气”。
+                int actual = conv.history.length() / 2;
+                conv.totalRounds = actual;
+                if (conv.summarizedRounds < 0) conv.summarizedRounds = 0;
+                if (conv.summarizedRounds > actual) conv.summarizedRounds = actual;
             } catch (Exception e) {
                 Util.log("会话文件解析失败 " + userId + ": " + e.getMessage());
             }
@@ -201,17 +207,29 @@ public class ConversationEngine {
             a.put("role", "assistant");
             a.put("content", assistant);
             conv.history.put(a);
-            conv.totalRounds++;
+            conv.totalRounds = conv.history.length() / 2; // 以 history 为唯一事实来源，避免计数漂移
         } catch (Exception e) {
             Util.log("appendRound 失败: " + e.getMessage());
         }
     }
 
+    /** 实际原始轮数（以 history 为准）。 */
+    public synchronized int actualRounds(Conv conv) {
+        return conv.history.length() / 2;
+    }
+
+    /** 尚未折叠进摘要的原始轮数；并把 summarizedRounds 钳制在合法范围。 */
+    public synchronized int unsummarizedRounds(Conv conv) {
+        int actual = actualRounds(conv);
+        conv.totalRounds = actual;
+        if (conv.summarizedRounds < 0) conv.summarizedRounds = 0;
+        if (conv.summarizedRounds > actual) conv.summarizedRounds = actual;
+        return actual - conv.summarizedRounds;
+    }
+
     /** 自动维护：尚未折叠的新对话里有多少个完整的 N 轮批次。 */
     public synchronized int fullBatchesPending(Conv conv) {
-        int n = ctxRounds();
-        int unsummarized = conv.totalRounds - conv.summarizedRounds;
-        return Math.max(0, unsummarized / n);
+        return Math.max(0, unsummarizedRounds(conv) / ctxRounds());
     }
 
     /** 是否到了自动压缩点（存在完整 N 轮批次）。 */
@@ -219,10 +237,10 @@ public class ConversationEngine {
         return fullBatchesPending(conv) > 0;
     }
 
-    /** 本次应折叠的轮数：自动只处理完整批次 N；手动允许不足 N 的零头。 */
+    /** 本次应折叠的轮数：自动只处理完整批次 N；手动允许不足 N 的零头；绝不会指向不存在的 history 区间。 */
     public synchronized int countToCompress(Conv conv, boolean allowPartial) {
+        int un = unsummarizedRounds(conv);
         int n = ctxRounds();
-        int un = conv.totalRounds - conv.summarizedRounds;
         if (un >= n) return n;
         if (allowPartial && un > 0) return un;
         return 0;
@@ -233,8 +251,10 @@ public class ConversationEngine {
      * 篇幅自适应：按「既有摘要 + 新批次」体量估算，下限 300、上限 3000，向百位取整。
      */
     public synchronized String buildBatchCompressPrompt(Conv conv, int count) {
-        int from = conv.summarizedRounds;
-        int to = Math.min(conv.totalRounds, from + count);
+        int actual = actualRounds(conv);
+        int from = Math.min(Math.max(0, conv.summarizedRounds), actual);
+        int to = Math.min(actual, from + Math.max(0, count));
+        if (to <= from) throw new IllegalStateException("待压缩批次为空（from=" + from + ",to=" + to + "），已阻止发送空压缩");
         StringBuilder todo = new StringBuilder();
         for (int i = from * 2; i < to * 2 && i < conv.history.length(); i++) {
             JSONObject o = conv.history.optJSONObject(i);
@@ -243,6 +263,7 @@ public class ConversationEngine {
                 todo.append(o.optString("content")).append('\n');
             }
         }
+        if (todo.toString().trim().isEmpty()) throw new IllegalStateException("待压缩内容为空，已阻止发送空压缩");
         String oldSummary = (conv.summary != null && !conv.summary.isEmpty())
                 ? conv.summary : "（无，这是第一批）";
         int material = todo.length() + (conv.summary == null ? 0 : conv.summary.length());
@@ -267,7 +288,8 @@ public class ConversationEngine {
     public synchronized void applyBatchSummary(Conv conv, String newSummary, int count) {
         if (newSummary == null || newSummary.trim().isEmpty()) return;
         conv.summary = newSummary.trim();
-        conv.summarizedRounds += count;
+        conv.summarizedRounds = Math.min(actualRounds(conv), conv.summarizedRounds + count);
+        conv.totalRounds = actualRounds(conv);
         save(conv);
         Util.log("记忆折叠完成：第" + (conv.summarizedRounds - count + 1) + "-" + conv.summarizedRounds
                 + "轮，摘要 " + conv.summary.length() + " 字，原始历史保留 " + conv.history.length() + " 条");

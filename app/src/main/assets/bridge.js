@@ -549,31 +549,34 @@
 
     nativeFill(input, o.prompt);
 
-    // 等待发送按钮可用（页面生成中则等待其完成，最长 90s）
-    setTimeout(function () {
+    // 尽快发送：先给框架一个极短 tick（60ms）登记输入并启用发送按钮，随后以 150ms 细粒度轮询；
+    // 只有页面正在生成（按钮 disabled）时才真正等待，避免每条消息都固定多等数百毫秒。
+    var startedAt = Date.now();
+    function enterFallback() {
+      try {
+        input.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+        }));
+      } catch (e) {}
+    }
+    function attempt() {
       var btn = findSendButton(input);
-      if (!btn) {
-        // 兜底：Enter 键发送
-        try {
-          input.dispatchEvent(new KeyboardEvent('keydown', {
-            key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
-          }));
-        } catch (e) {}
+      if (btn) {
+        if (!isBtnDisabled(btn)) {
+          try { btn.click(); } catch (e) { log('click fail: ' + e.message); }
+          return;
+        }
+        if (Date.now() - startedAt > 90000) {
+          log('发送按钮持续不可用（页面可能生成中），改用 Enter 键');
+          enterFallback();
+          return;
+        }
+        setTimeout(attempt, 150);
       } else {
-        waitForSendEnabled(btn, 90000, function (ok) {
-          if (ok) {
-            try { btn.click(); } catch (e) { log('click fail: ' + e.message); }
-          } else {
-            log('发送按钮持续不可用（页面可能生成中），改用 Enter 键');
-            try {
-              input.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
-              }));
-            } catch (e) {}
-          }
-        });
+        enterFallback(); // 兜底：Enter 键发送
       }
-    }, 300);
+    }
+    setTimeout(attempt, 60);
 
     // 超时守护：180s 未捕获回复则报错
     setTimeout(function () {
