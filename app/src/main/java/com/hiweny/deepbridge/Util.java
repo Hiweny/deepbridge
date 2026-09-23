@@ -42,6 +42,12 @@ public final class Util {
         return new SimpleDateFormat("yyyy年MM月dd日 HH:mm", Locale.CHINA).format(d) + " 星期" + week[d.getDay()];
     }
 
+    /** 时间戳 -> HH:mm；0/负返回 —。 */
+    public static String timeHM(long ts) {
+        if (ts <= 0) return "—";
+        return new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date(ts));
+    }
+
     /** 把 Markdown 清洗成适合微信阅读的纯文本。 */
     public static String wechatify(String s) {
         if (s == null) return "";

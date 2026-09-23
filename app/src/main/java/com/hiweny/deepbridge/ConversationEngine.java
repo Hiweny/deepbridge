@@ -56,6 +56,8 @@ public class ConversationEngine {
         public String summary = "";
         public JSONArray history = new JSONArray();
         public int totalRounds = 0;
+        /** 已折叠进 summary 的 leading 轮数；原始 history 始终完整保留、不裁剪。 */
+        public int summarizedRounds = 0;
         public long lastCompressAttempt = 0;
     }
 
@@ -94,6 +96,7 @@ public class ConversationEngine {
                 conv.summary = j.optString("summary");
                 conv.history = j.optJSONArray("history") != null ? j.optJSONArray("history") : new JSONArray();
                 conv.totalRounds = j.optInt("totalRounds", 0);
+                conv.summarizedRounds = j.optInt("summarizedRounds", 0);
             } catch (Exception e) {
                 Util.log("会话文件解析失败 " + userId + ": " + e.getMessage());
             }
@@ -111,6 +114,7 @@ public class ConversationEngine {
             j.put("summary", conv.summary);
             j.put("history", conv.history);
             j.put("totalRounds", conv.totalRounds);
+            j.put("summarizedRounds", conv.summarizedRounds);
             Util.writeFile(fileFor(conv.userId), j.toString());
         } catch (Exception e) {
             Util.log("保存会话失败: " + e.getMessage());
@@ -126,9 +130,11 @@ public class ConversationEngine {
         return prefs().getString("persona", DEFAULT_PERSONA);
     }
 
-    public int ctxRounds() { return prefs().getInt("ctx_rounds", 8); }
-    public int compressRounds() { return prefs().getInt("compress_rounds", 12); }
-    public int rotateRounds() { return prefs().getInt("rotate_rounds", 100); }
+    /**
+     * 唯一的记忆控制数值 N：既是发给 AI 的上下文窗口（最近 N 轮），
+     * 也是一批压缩的轮次（每攒满 N 轮新对话就折叠一批并与旧总结合并）。默认 20。
+     */
+    public int ctxRounds() { return Math.max(2, prefs().getInt("ctx_rounds", 20)); }
     public boolean thinkingEnabled() { return prefs().getBoolean("thinking", false); }
     public boolean timeInject() { return prefs().getBoolean("time_inject", true); }
     public boolean multiMsg() { return prefs().getBoolean("multi_msg", true); }
@@ -195,25 +201,44 @@ public class ConversationEngine {
         }
     }
 
+    /** 自动维护：尚未折叠的新对话里有多少个完整的 N 轮批次。 */
+    public synchronized int fullBatchesPending(Conv conv) {
+        int n = ctxRounds();
+        int unsummarized = conv.totalRounds - conv.summarizedRounds;
+        return Math.max(0, unsummarized / n);
+    }
+
+    /** 是否到了自动压缩点（存在完整 N 轮批次）。 */
     public synchronized boolean needsCompress(Conv conv) {
-        return conv.history.length() > Math.max(compressRounds() * 2, (ctxRounds() * 2) + 4);
+        return fullBatchesPending(conv) > 0;
+    }
+
+    /** 本次应折叠的轮数：自动只处理完整批次 N；手动允许不足 N 的零头。 */
+    public synchronized int countToCompress(Conv conv, boolean allowPartial) {
+        int n = ctxRounds();
+        int un = conv.totalRounds - conv.summarizedRounds;
+        if (un >= n) return n;
+        if (allowPartial && un > 0) return un;
+        return 0;
     }
 
     /**
-     * 记忆压缩 Prompt。篇幅不写死：按「既有摘要 + 待压缩对话」的体量自适应估算，
-     * 下限 300、上限取用户配置（默认 3000），并向百位取整。
+     * 折叠指定批次（从 summarizedRounds 起 count 轮）并与既有总结合并的 Prompt。
+     * 篇幅自适应：按「既有摘要 + 新批次」体量估算，下限 300、上限 3000，向百位取整。
      */
-    public synchronized String buildCompressPrompt(Conv conv) {
-        int drop = Math.max(0, conv.history.length() - (ctxRounds() * 2));
+    public synchronized String buildBatchCompressPrompt(Conv conv, int count) {
+        int from = conv.summarizedRounds;
+        int to = Math.min(conv.totalRounds, from + count);
         StringBuilder todo = new StringBuilder();
-        for (int i = 0; i < drop; i++) {
+        for (int i = from * 2; i < to * 2 && i < conv.history.length(); i++) {
             JSONObject o = conv.history.optJSONObject(i);
             if (o != null) {
-                todo.append("user".equals(o.optString("role")) ? "[用户] " : "[助手] ");
+                todo.append("user".equals(o.optString("role")) ? "[主人] " : "[你] ");
                 todo.append(o.optString("content")).append('\n');
             }
         }
-        String oldSummary = (conv.summary != null && !conv.summary.isEmpty()) ? conv.summary : "（无）";
+        String oldSummary = (conv.summary != null && !conv.summary.isEmpty())
+                ? conv.summary : "（无，这是第一批）";
         int material = todo.length() + (conv.summary == null ? 0 : conv.summary.length());
 
         int max = Math.max(300, summaryMaxChar());
@@ -227,28 +252,27 @@ public class ConversationEngine {
         StringBuilder sb = new StringBuilder();
         sb.append(tpl.trim()).append("\n\n");
         sb.append("【既有摘要】\n").append(oldSummary).append("\n\n");
-        sb.append("【待压缩对话】\n").append(todo.toString().trim()).append('\n');
+        sb.append("【新增对话批次】（第 ").append(from + 1).append('—').append(to).append(" 轮）\n")
+          .append(todo.toString().trim()).append('\n');
         return sb.toString();
     }
 
-    public synchronized void applySummary(Conv conv, String summary) {
-        if (summary == null || summary.trim().isEmpty()) return;
-        conv.summary = summary.trim();
-        JSONArray kept = new JSONArray();
-        for (int i = Math.max(0, conv.history.length() - (ctxRounds() * 2)); i < conv.history.length(); i++) {
-            kept.put(conv.history.optJSONObject(i));
-        }
-        conv.history = kept;
+    /** 写入合并后的摘要、推进已折叠计数；原始 history 完整保留、绝不裁剪。 */
+    public synchronized void applyBatchSummary(Conv conv, String newSummary, int count) {
+        if (newSummary == null || newSummary.trim().isEmpty()) return;
+        conv.summary = newSummary.trim();
+        conv.summarizedRounds += count;
         save(conv);
-        Util.log("记忆压缩完成，摘要 " + conv.summary.length() + " 字，窗口剩 " + conv.history.length() + " 条");
+        Util.log("记忆折叠完成：第" + (conv.summarizedRounds - count + 1) + "-" + conv.summarizedRounds
+                + "轮，摘要 " + conv.summary.length() + " 字，原始历史保留 " + conv.history.length() + " 条");
     }
 
-    public synchronized void rotateSession(Conv conv) {
+    /** 仅重置 DeepSeek 网站会话（点 New chat），本地记忆、计数、历史一律保留。 */
+    public synchronized void resetWebSession(Conv conv) {
         conv.deepseekSessionId = null;
         conv.parentMsgId = null;
-        conv.totalRounds = 0;
         save(conv);
-        Util.log("会话已轮换（保留记忆摘要）");
+        Util.log("网站会话已 New chat（本地记忆与计数保留）");
     }
 
     public synchronized void reset(Conv conv) {
@@ -257,14 +281,15 @@ public class ConversationEngine {
         conv.summary = "";
         conv.history = new JSONArray();
         conv.totalRounds = 0;
+        conv.summarizedRounds = 0;
         save(conv);
         Util.log("会话与记忆已全部重置: " + conv.userId);
     }
 
     public synchronized String statusText(Conv conv) {
         StringBuilder sb = new StringBuilder();
-        sb.append("累计轮数: ").append(conv.totalRounds);
-        sb.append("\n窗口消息: ").append(conv.history.length()).append(" 条（窗口 ").append(ctxRounds()).append(" 轮）");
+        sb.append("累计轮数: ").append(conv.totalRounds).append("（已折叠记忆 ").append(conv.summarizedRounds).append(" 轮）");
+        sb.append("\n窗口/批次: ").append(ctxRounds()).append(" 轮（最近窗口即压缩批次）");
         sb.append("\n记忆摘要: ").append(conv.summary.isEmpty() ? "无" : conv.summary.length() + " 字");
         sb.append("\n时间注入: ").append(timeInject() ? "开" : "关").append(" | 多条消息: ").append(multiMsg() ? "开" : "关");
         sb.append("\n文件传输: ").append(fileTransfer() ? "开" : "关");

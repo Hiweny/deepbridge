@@ -43,6 +43,10 @@ public class BotService extends Service {
     public static volatile int msgReceived = 0;
     public static volatile int msgReplied = 0;
     public static volatile boolean pollAlive = false;
+    /** 前台服务进程是否存活（供无障碍保活检测并拉起）。 */
+    public static volatile boolean serviceRunning = false;
+    /** AI 当前阶段，用于常驻通知展示：等待消息 / 处理中 / DeepSeek 思考中 / 已回复。 */
+    public static volatile String aiStatus = "等待消息";
     private static volatile StatusUi statusUi;
 
     private String base;
@@ -96,6 +100,7 @@ public class BotService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        serviceRunning = true;
         createChannel();
         Notification n = buildNotification("微信桥启动中…");
         if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIF_ID, n, 1);
@@ -124,6 +129,7 @@ public class BotService extends Service {
                 if (wakeLock != null && !wakeLock.isHeld() && running.get()) {
                     wakeLock.acquire(24 * 60 * 60 * 1000L);
                 }
+                refreshNotification(); // 周期性刷新常驻通知，保持 AI/微信状态与时间实时
             } catch (Exception e) {
                 Util.log("看门狗异常: " + e.getMessage());
             }
@@ -134,6 +140,29 @@ public class BotService extends Service {
     private void startWatchdog() {
         watchdog.removeCallbacks(watchdogTask);
         watchdog.postDelayed(watchdogTask, 60000L);
+    }
+
+    /** 一段时间无动作后，通知状态回到“等待消息”。 */
+    private final Runnable resetIdle = new Runnable() {
+        @Override public void run() {
+            if (!DeepSeekController.get().isBusy()) { aiStatus = "等待消息"; refreshNotification(); }
+        }
+    };
+
+    /** 更新 AI 阶段并立即刷新常驻通知；15s 后若空闲则回到等待。 */
+    private void setAiStatus(final String s) {
+        aiStatus = s;
+        refreshNotification();
+        watchdog.removeCallbacks(resetIdle);
+        if (!"等待消息".equals(s)) watchdog.postDelayed(resetIdle, 15000L);
+    }
+
+    /**用当前连接/AI/收发状态重建并刷新常驻通知。 */
+    void refreshNotification() {
+        try {
+            ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
+                    .notify(NOTIF_ID, buildNotification(connectionState));
+        } catch (Exception ignored) {}
     }
 
     @Override
@@ -175,6 +204,8 @@ public class BotService extends Service {
                 .getString("ilink_token", null) == null;
         running.set(false);
         pollAlive = false;
+        serviceRunning = false;
+        aiStatus = "已停止";
         watchdog.removeCallbacks(watchdogTask);
         if (pollThread != null) pollThread.interrupt();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
@@ -320,12 +351,12 @@ public class BotService extends Service {
             return;
         }
         if (cmd.equals("/压缩") || cmd.equals("/compress") || cmd.equals("压缩")) {
-            if (!engine.needsCompress(conv) && ((conv.summary == null || conv.summary.isEmpty()) && conv.history.length() == 0)) {
+            if ((conv.summary == null || conv.summary.isEmpty()) && conv.history.length() == 0) {
                 reply(uid, contextToken, "当前没有需要压缩的历史。");
                 return;
             }
             sendTyping(uid, contextToken, true);
-            String r = doCompress(conv, uid);
+            String r = compressConv(this, conv);
             sendTyping(uid, contextToken, false);
             reply(uid, contextToken, r);
             return;
@@ -363,6 +394,7 @@ public class BotService extends Service {
 
         // ---------- 正常对话（可能带附件） ----------
         sendTyping(uid, contextToken, true);
+        setAiStatus("收到消息，处理中…");
         try {
             final String typed = realUserText(extractText);
 
@@ -411,6 +443,7 @@ public class BotService extends Service {
             String prompt = engine.buildPrompt(conv, currentMsg);
 
             // 4) 发送（有附件走 attachFile+send，无附件走原路径）
+            setAiStatus("DeepSeek 思考生成中…");
             JSONObject result = files.isEmpty()
                     ? DeepSeekController.get().sendPrompt(prompt)
                     : DeepSeekController.get().sendWithFiles(prompt, files, 200);
@@ -424,6 +457,7 @@ public class BotService extends Service {
                 String out = Util.wechatify(answer);
                 if (recalled) out = "⚠️ 该回复已被 DeepSeek 官方撤回，以下为拦截恢复的内容：\n————————\n" + out;
                 reply(uid, contextToken, out);
+                setAiStatus("已回复微信 ✓");
                 maintenanceExec.submit(() -> postReplyMaintenance(engine, conv, uid));
                 return;
             }
@@ -438,43 +472,65 @@ public class BotService extends Service {
 
     private void postReplyMaintenance(ConversationEngine engine, ConversationEngine.Conv conv, String uid) {
         try {
-            if (!DeepSeekController.get().isBusy() && engine.needsCompress(conv) && engine.compressCooldownOk(conv)) {
-                Util.log("自动压缩(" + uid + "): " + compressConv(this, conv, 120));
+            // 滑窗记忆：每攒满 N 轮新对话，就把这一批折叠并与旧总结合并；原始历史不裁剪、窗口不重置。
+            int guard = 0;
+            while (engine.countToCompress(conv, false) > 0 && guard++ < 30) {
+                int count = engine.countToCompress(conv, false);
+                conv.lastCompressAttempt = System.currentTimeMillis();
+                int from = conv.summarizedRounds;
+                JSONObject r = DeepSeekController.get()
+                        .sendPrompt(engine.buildBatchCompressPrompt(conv, count), 120);
+                if (r.optBoolean("ok") && !r.optString("content").isEmpty()) {
+                    engine.applyBatchSummary(conv, r.optString("content").trim(), count);
+                    Util.log("自动折叠(" + uid + ") 第" + (from + 1) + "-" + (from + count) + "轮");
+                } else {
+                    Util.log("自动折叠失败(" + uid + "): " + r.optString("error", "EMPTY"));
+                    break;
+                }
+                // 每折叠一批就把 DeepSeek 网站会话 New chat 保持精简（含折叠产生的内部回合）；本地记忆/计数保留。
+                if (!DeepSeekController.get().isBusy()
+                        && DeepSeekController.get().newChat().optBoolean("ok")) {
+                    engine.resetWebSession(conv);
+                    Util.log("网站会话已 New chat（本地记忆保留）");
+                }
             }
-            if (DeepSeekController.get().isBusy() || conv.totalRounds < engine.rotateRounds()) return;
-            if (!DeepSeekController.get().newChat().optBoolean("ok")) return;
-            engine.rotateSession(conv);
-            Util.log("会话已轮换（New chat，记忆摘要保留）");
         } catch (Exception e) {
             Util.log("后台维护异常: " + e.getMessage());
         }
     }
 
-    private String doCompress(ConversationEngine.Conv conv, String uid) {
-        return compressConv(this, conv, 200);
-    }
-
+    /**
+     * 手动压缩：折叠全部待处理批次（允许不足 N 轮的零头），逐条返回结果。
+     * 供微信「/压缩」与控制台调用。
+     */
     public static String compressConv(Context context, ConversationEngine.Conv conv) {
-        return compressConv(context, conv, 200);
-    }
-
-    public static String compressConv(Context context, ConversationEngine.Conv conv, int timeoutSec) {
-        try {
+        ConversationEngine engine = ConversationEngine.get(context);
+        StringBuilder out = new StringBuilder();
+        boolean allowPartial = true;
+        int guard = 0;
+        while (guard++ < 30) {
+            int count = engine.countToCompress(conv, allowPartial);
+            if (count <= 0) break;
             conv.lastCompressAttempt = System.currentTimeMillis();
-            ConversationEngine engine = ConversationEngine.get(context);
-            if (conv.history.length() == 0 && (conv.summary == null || conv.summary.isEmpty())) {
-                return "无对话历史，无需压缩";
+            int from = conv.summarizedRounds;
+            try {
+                JSONObject r = DeepSeekController.get()
+                        .sendPrompt(engine.buildBatchCompressPrompt(conv, count), 200);
+                if (r.optBoolean("ok") && !r.optString("content").isEmpty()) {
+                    engine.applyBatchSummary(conv, r.optString("content").trim(), count);
+                    out.append("✅ 已折叠第").append(from + 1).append('-').append(from + count)
+                       .append(" 轮，摘要 ").append(conv.summary.length()).append(" 字。\n");
+                } else {
+                    out.append("⚠️ 压缩失败：").append(r.optString("error", "EMPTY"));
+                    break;
+                }
+            } catch (Exception e) {
+                out.append("⚠️ 压缩异常: ").append(e.getMessage());
+                break;
             }
-            JSONObject r = DeepSeekController.get().sendPrompt(engine.buildCompressPrompt(conv), timeoutSec);
-            if (r.optBoolean("ok") && !r.optString("content").isEmpty()) {
-                engine.applySummary(conv, r.optString("content").trim());
-                return "✅ 记忆压缩完成，新摘要 " + conv.summary.length() + " 字。";
-            }
-            lastError = "压缩失败: " + r.optString("error", "EMPTY");
-            return "⚠️ 压缩失败：" + r.optString("error", "EMPTY");
-        } catch (Exception e) {
-            return "⚠️ 压缩异常: " + e.getMessage();
         }
+        String s = out.toString().trim();
+        return s.isEmpty() ? "当前没有需要压缩的历史。" : s;
     }
 
     private void reply(String uid, String contextToken, String text) {
@@ -572,11 +628,27 @@ public class BotService extends Service {
         i.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= 23) flags |= PendingIntent.FLAG_IMMUTABLE;
+        PendingIntent openPi = PendingIntent.getActivity(this, 0, i, flags);
+
+        // 动作：立即重启桥接（无需打开界面）
+        Intent rs = new Intent(this, BotService.class).setAction(ACTION_START);
+        PendingIntent restartPi = PendingIntent.getService(this, 2, rs, flags);
+
+        String connLine = pollAlive ? "微信轮询：在线" : "微信轮询：" + text;
+        String big =
+                "🤖 AI 状态：" + aiStatus + "\n" +
+                "🔗 " + connLine + "\n" +
+                "📩 已收到 " + msgReceived + " 条（最近 " + Util.timeHM(lastMsgRecv) + "）\n" +
+                "💬 已回复 " + msgReplied + " 条（最近 " + Util.timeHM(lastReplyOk) + "）";
         b.setContentTitle("DeepSeek 微信桥")
-         .setContentText(text)
+         .setContentText("AI：" + aiStatus + "｜" + (pollAlive ? "在线" : text))
+         .setStyle(new Notification.BigTextStyle().bigText(big))
          .setSmallIcon(android.R.drawable.stat_notify_chat)
-         .setContentIntent(PendingIntent.getActivity(this, 0, i, flags))
-         .setOngoing(true);
+         .setContentIntent(openPi)
+         .addAction(android.R.drawable.ic_menu_rotate, "重启桥接", restartPi)
+         .setOngoing(true)
+         .setOnlyAlertOnce(true);
+        if (Build.VERSION.SDK_INT < 26) b.setPriority(Notification.PRIORITY_LOW);
         return b.build();
     }
 }

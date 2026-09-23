@@ -1026,18 +1026,12 @@ public class MainActivity extends Activity {
         persona.setTextSize(13f);
         box.addView(label("角色人设（系统提示词）"));
         box.addView(persona);
-        final EditText ctxRounds = numberField(String.valueOf(prefs().getInt("ctx_rounds", 8)));
-        box.addView(label("上下文窗口轮数（默认 8）"));
+        final EditText ctxRounds = numberField(String.valueOf(ConversationEngine.get(this).ctxRounds()));
+        box.addView(label("上下文窗口轮数 N（默认 20）"));
         box.addView(ctxRounds);
-        final EditText compressRounds = numberField(String.valueOf(prefs().getInt("compress_rounds", 12)));
-        box.addView(label("自动记忆压缩阈值轮数（默认 12）"));
-        box.addView(compressRounds);
-        final EditText rotateRounds = numberField(String.valueOf(prefs().getInt("rotate_rounds", 100)));
-        box.addView(label("DeepSeek 会话轮换阈值轮数（默认 100）"));
-        box.addView(rotateRounds);
-        final EditText summaryMax = numberField(String.valueOf(prefs().getInt("summary_max", 3000)));
-        box.addView(label("记忆摘要上限字数（自适应压缩，硬上限，默认 3000）"));
-        box.addView(summaryMax);
+        TextView nHint = label("N 既是发给 AI 的可见上下文（最近 N 轮），也是一批记忆压缩的轮次：每满 N 轮自动折叠为摘要并与旧记忆合并，原始记录保留、窗口不重置。建议 20–30。");
+        nHint.setTextSize(11.5f);
+        box.addView(nHint);
         final CheckBox battery = new CheckBox(this);
         battery.setText("电池优化白名单" + (isIgnoringBattery() ? "（已开启 ✓）" : "（后台保活，强烈建议开启）"));
         battery.setChecked(isIgnoringBattery());
@@ -1047,20 +1041,69 @@ public class MainActivity extends Activity {
             battery.setText("电池优化白名单" + (isIgnoringBattery() ? "（已开启 ✓）" : "（后台保活，强烈建议开启）"));
         });
         box.addView(battery);
+
+        final Button accessibility = new Button(this);
+        accessibility.setAllCaps(false);
+        accessibility.setText(accessibilityText());
+        accessibility.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS));
+            } catch (Exception e) {
+                toast("未找到无障碍设置");
+            }
+        });
+        box.addView(label("无障碍保活（vivo 后台更稳，强烈建议）"));
+        box.addView(accessibility);
+
+        final Button vivoGuide = new Button(this);
+        vivoGuide.setAllCaps(false);
+        vivoGuide.setText("查看 vivo / 系统后台保活设置指引");
+        vivoGuide.setOnClickListener(v -> showKeepAliveGuide());
+        box.addView(vivoGuide);
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(box);
         dialogBuilder().setTitle("更多设置").setView(scroll)
                 .setPositiveButton("保存", (d, w) -> {
                     prefs().edit()
                             .putString("persona", persona.getText().toString().trim())
-                            .putInt("ctx_rounds", parseInt(ctxRounds, 8))
-                            .putInt("compress_rounds", parseInt(compressRounds, 12))
-                            .putInt("rotate_rounds", parseInt(rotateRounds, 100))
-                            .putInt("summary_max", Math.max(300, Math.min(3000, parseInt(summaryMax, 3000))))
+                            .putInt("ctx_rounds", Math.max(2, parseInt(ctxRounds, 20)))
                             .apply();
                     toast("已保存");
                 })
                 .setNegativeButton("取消", null).show();
+    }
+
+    /** 无障碍保活是否已开启（系统安全设置里本应用的服务是否在启用列表）。 */
+    private boolean isAccessibilityEnabled() {
+        try {
+            String enabled = android.provider.Settings.Secure.getString(getContentResolver(),
+                    android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            if (enabled == null) return false;
+            return enabled.contains(getPackageName() + "/" + KeepAliveAccessibility.class.getName())
+                    || enabled.contains(getPackageName() + "/.KeepAliveAccessibility");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String accessibilityText() {
+        return isAccessibilityEnabled()
+                ? "无障碍保活：已开启 ✓（点击查看）"
+                : "点击去开启无障碍保活";
+    }
+
+    /** vivo / OriginOS 后台保活的系统侧设置指引。 */
+    private void showKeepAliveGuide() {
+        String s =
+                "为让 DeepBridge 在 vivo/OriginOS 后台长时间不断桥，请逐项设置：\n\n" +
+                "1️⃣ 允许自启动：i管家（或 设置→应用与权限→权限管理）→ 自启动，找到「DeepSeek 微信桥」并打开；右上角「关联启动」也建议允许。\n\n" +
+                "2️⃣ 允许后台高耗电：设置 → 电池 → 后台耗电管理（后台高耗电），找到本应用，选择「允许后台高耗电 / 禁止限制」。\n\n" +
+                "3️⃣ 锁定后台卡片：调出卡片式后台，按住本应用卡片下滑即可锁定（出现锁图标），一键加速时不会被清掉。\n\n" +
+                "4️⃣ 开启本页「电池优化白名单」与「无障碍保活」。\n\n" +
+                "完成后覆盖安装本应用即可，无需重新扫码。";
+        dialogBuilder().setTitle("后台保活设置指引").setMessage(s)
+                .setPositiveButton("知道了", null).show();
     }
 
     private EditText numberField(String val) {
